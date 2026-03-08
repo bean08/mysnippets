@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import Foundation
 import SwiftUI
 
@@ -494,6 +495,225 @@ final class UISettings: ObservableObject {
   @AppStorage("rowHeight") var rowHeight: Double = 22
 }
 
+final class GlobalHotKeyManager {
+  static let shared = GlobalHotKeyManager()
+
+  private static let hotKeySignature: OSType = 0x4D535048 // "MSPH"
+  private static let hotKeyID: UInt32 = 1
+
+  var onPressed: (() -> Void)?
+
+  private var hotKeyRef: EventHotKeyRef?
+  private var handlerRef: EventHandlerRef?
+  private var isRegistered = false
+
+  private init() {}
+
+  deinit {
+    if let hotKeyRef {
+      UnregisterEventHotKey(hotKeyRef)
+    }
+    if let handlerRef {
+      RemoveEventHandler(handlerRef)
+    }
+  }
+
+  func registerIfNeeded() {
+    if isRegistered { return }
+
+    var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+    let selfPointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+
+    InstallEventHandler(
+      GetEventDispatcherTarget(),
+      { _, event, userData in
+        guard let userData else { return noErr }
+        let manager = Unmanaged<GlobalHotKeyManager>.fromOpaque(userData).takeUnretainedValue()
+        return manager.handle(event: event)
+      },
+      1,
+      &eventType,
+      selfPointer,
+      &handlerRef
+    )
+
+    let hotKeyID = EventHotKeyID(signature: Self.hotKeySignature, id: Self.hotKeyID)
+    RegisterEventHotKey(
+      UInt32(kVK_ANSI_0),
+      UInt32(optionKey),
+      hotKeyID,
+      GetEventDispatcherTarget(),
+      0,
+      &hotKeyRef
+    )
+
+    isRegistered = true
+  }
+
+  private func handle(event: EventRef?) -> OSStatus {
+    var hotKeyID = EventHotKeyID()
+    let status = GetEventParameter(
+      event,
+      EventParamName(kEventParamDirectObject),
+      EventParamType(typeEventHotKeyID),
+      nil,
+      MemoryLayout<EventHotKeyID>.size,
+      nil,
+      &hotKeyID
+    )
+    guard status == noErr else { return status }
+
+    if hotKeyID.signature == Self.hotKeySignature, hotKeyID.id == Self.hotKeyID {
+      DispatchQueue.main.async { [weak self] in
+        self?.onPressed?()
+      }
+    }
+    return noErr
+  }
+}
+
+final class QuickInsertController {
+  static let shared = QuickInsertController()
+
+  private weak var store: SnippetStore?
+  private weak var settings: UISettings?
+  private var panel: NSPanel?
+  private var host: NSHostingController<AnyView>?
+  private var previousActiveApp: NSRunningApplication?
+  private var presentationID = UUID()
+
+  private init() {}
+
+  func configure(store: SnippetStore, settings: UISettings) {
+    self.store = store
+    self.settings = settings
+    updatePanelContentIfNeeded()
+  }
+
+  func show() {
+    guard let store, let settings else { return }
+    previousActiveApp = NSWorkspace.shared.frontmostApplication
+    presentationID = UUID()
+
+    if panel == nil {
+      let panel = QuickSearchPanel(
+        contentRect: NSRect(x: 0, y: 0, width: 640, height: 460),
+        styleMask: [.titled, .closable, .nonactivatingPanel],
+        backing: .buffered,
+        defer: false
+      )
+      panel.title = "快速搜索 Snippet"
+      panel.level = .floating
+      panel.center()
+      panel.isReleasedWhenClosed = false
+      panel.hidesOnDeactivate = false
+      panel.collectionBehavior = [.moveToActiveSpace]
+      self.panel = panel
+    }
+
+    let view = AnyView(QuickInsertView(
+      onSubmit: { [weak self] snippet in
+        self?.insert(snippet)
+      },
+      onCancel: { [weak self] in
+        self?.hide()
+      }
+    )
+    .environmentObject(store)
+    .environmentObject(settings)
+    .id(presentationID))
+
+    if let host {
+      host.rootView = view
+    } else {
+      let host = NSHostingController(rootView: view)
+      self.host = host
+      panel?.contentViewController = host
+    }
+
+    panel?.makeKeyAndOrderFront(nil)
+    panel?.orderFrontRegardless()
+  }
+
+  func hide() {
+    panel?.orderOut(nil)
+  }
+
+  private func updatePanelContentIfNeeded() {
+    guard panel != nil, let store, let settings else { return }
+    let view = AnyView(QuickInsertView(
+      onSubmit: { [weak self] snippet in
+        self?.insert(snippet)
+      },
+      onCancel: { [weak self] in
+        self?.hide()
+      }
+    )
+    .environmentObject(store)
+    .environmentObject(settings))
+    host?.rootView = view
+  }
+
+  private func insert(_ snippet: Snippet) {
+    let text = stripComments(snippet.body)
+    hide()
+    pasteToPreviousApp(text)
+  }
+
+  private func pasteToPreviousApp(_ text: String) {
+    if let app = previousActiveApp, app != NSRunningApplication.current {
+      app.activate(options: [.activateIgnoringOtherApps])
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+        self?.pasteViaCommandV(text)
+      }
+      return
+    }
+
+    pasteViaCommandV(text)
+  }
+
+  private func pasteViaCommandV(_ text: String) {
+    let pb = NSPasteboard.general
+    pb.clearContents()
+    pb.setString(text, forType: .string)
+
+    if triggerPasteViaSystemEvents() {
+      return
+    }
+
+    _ = triggerPasteViaCGEvent()
+  }
+
+  private func triggerPasteViaSystemEvents() -> Bool {
+    let script = """
+    tell application "System Events"
+      keystroke "v" using command down
+    end tell
+    """
+    var error: NSDictionary?
+    let result = NSAppleScript(source: script)?.executeAndReturnError(&error)
+    return result != nil && error == nil
+  }
+
+  private func triggerPasteViaCGEvent() -> Bool {
+    guard let source = CGEventSource(stateID: .hidSystemState),
+          let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true),
+          let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false)
+    else { return false }
+
+    keyDown.flags = .maskCommand
+    keyUp.flags = .maskCommand
+    keyDown.post(tap: .cghidEventTap)
+    keyUp.post(tap: .cghidEventTap)
+    return true
+  }
+}
+
+final class QuickSearchPanel: NSPanel {
+  override var canBecomeKey: Bool { true }
+  override var canBecomeMain: Bool { false }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)
@@ -512,6 +732,13 @@ struct mysnippetsApp: App {
       ContentView()
         .environmentObject(store)
         .environmentObject(settings)
+        .onAppear {
+          QuickInsertController.shared.configure(store: store, settings: settings)
+          GlobalHotKeyManager.shared.registerIfNeeded()
+          GlobalHotKeyManager.shared.onPressed = {
+            QuickInsertController.shared.show()
+          }
+        }
     }
     .windowResizability(.contentSize)
     .defaultSize(width: 1150, height: 760)
@@ -519,6 +746,406 @@ struct mysnippetsApp: App {
     Settings {
       SettingsView()
         .environmentObject(settings)
+    }
+  }
+}
+
+struct QuickInsertView: View {
+  @EnvironmentObject private var store: SnippetStore
+  @EnvironmentObject private var settings: UISettings
+
+  let onSubmit: (Snippet) -> Void
+  let onCancel: () -> Void
+
+  private struct QuickGroup: Hashable {
+    let path: [String]
+    let name: String
+  }
+
+  private enum QuickItem: Hashable, Identifiable {
+    case group(QuickGroup)
+    case snippet(Snippet)
+
+    var id: String {
+      switch self {
+      case .group(let g): return "g:\(g.path.joined(separator: "/"))"
+      case .snippet(let s): return "s:\(s.id)"
+      }
+    }
+  }
+
+  @State private var search = ""
+  @State private var selectedItemID: String?
+  @State private var currentGroupPath: [String] = []
+  @State private var focusSearchField = false
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      header
+
+      HSplitView {
+        leftPane
+        rightPane
+      }
+      .frame(minHeight: 360)
+
+    }
+    .padding(14)
+    .frame(width: 860, height: 500)
+    .onAppear {
+      selectedItemID = quickItems.first?.id
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+        focusSearchField = true
+      }
+    }
+    .onExitCommand {
+      handleEscape()
+    }
+  }
+
+  private var header: some View {
+    HStack {
+      Text("快速搜索并填充")
+        .font(.headline)
+      Spacer()
+      Text("快捷键: Option + 0")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+  }
+
+  private var leftPane: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      if !currentGroupPath.isEmpty {
+        HStack(spacing: 8) {
+          Text("当前位置: \(currentGroupPath.joined(separator: " / "))")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          Spacer()
+          Button("返回上一级") {
+            navigateUpOneLevel()
+          }
+          .buttonStyle(.borderless)
+        }
+      }
+
+      QuickSearchField(
+        placeholder: "搜索名称、触发词、正文",
+        text: $search,
+        shouldFocus: $focusSearchField,
+        onMoveUp: { moveSelection(step: -1) },
+        onMoveDown: { moveSelection(step: 1) },
+        onSubmit: { handleSubmit() },
+        onEscape: { handleEscape() }
+      )
+
+      ScrollViewReader { proxy in
+        List(quickItems, selection: $selectedItemID) { item in
+          switch item {
+          case .group(let group):
+            HStack(spacing: 8) {
+              Image(systemName: "folder")
+                .foregroundStyle(.secondary)
+              Text(group.name)
+                .font(.system(size: settings.fontSize, weight: .medium))
+              Spacer(minLength: 4)
+              Text("组")
+                .font(.system(size: max(10, settings.fontSize - 2)))
+                .foregroundStyle(.secondary)
+            }
+            .tag(item.id)
+            .id(item.id)
+          case .snippet(let snippet):
+            HStack(spacing: 8) {
+              Image(systemName: "text.alignleft")
+                .foregroundStyle(.secondary)
+              Text(snippet.name)
+                .font(.system(size: settings.fontSize))
+              Spacer(minLength: 4)
+              if !snippet.trigger.isEmpty {
+                Text(snippet.trigger)
+                  .font(.system(size: max(10, settings.fontSize - 1), weight: .medium, design: .monospaced))
+                  .foregroundStyle(.secondary)
+              }
+            }
+            .tag(item.id)
+            .id(item.id)
+          }
+        }
+        .onChange(of: quickItems.map(\.id)) { ids in
+          if let current = selectedItemID, ids.contains(current) { return }
+          selectedItemID = ids.first
+        }
+        .onChange(of: selectedItemID) { id in
+          guard let id else { return }
+          withAnimation(.easeOut(duration: 0.12)) {
+            proxy.scrollTo(id, anchor: .center)
+          }
+        }
+      }
+    }
+    .frame(minWidth: 450)
+  }
+
+  private var rightPane: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text("预览")
+        .font(.headline)
+
+      if let item = selectedItem {
+        switch item {
+        case .group(let group):
+          Text(group.name)
+            .font(.title3.weight(.semibold))
+          Text(group.path.joined(separator: " / "))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+          let directChildren = directChildGroupCount(of: group.path)
+          let directSnippets = snippetsInExactGroup(group.path).count
+          let allSnippets = activeSnippets.filter { isPrefixPath(group.path, of: $0.groupPath) }.count
+          VStack(alignment: .leading, spacing: 4) {
+            Text("下级分组: \(directChildren)")
+            Text("本组 snippet: \(directSnippets)")
+            Text("包含子组共 snippet: \(allSnippets)")
+          }
+          .font(.system(size: settings.fontSize))
+
+          Spacer()
+          Text("按 Enter 进入该组下一级")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        case .snippet(let snippet):
+          Text(snippet.name)
+            .font(.title3.weight(.semibold))
+          Text(snippet.groupPath.joined(separator: " / "))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          if !snippet.trigger.isEmpty {
+            Text("触发词: \(snippet.trigger)")
+              .font(.system(size: settings.fontSize, design: .monospaced))
+              .foregroundStyle(.secondary)
+          }
+
+          ScrollView {
+            Text(renderPreview(snippet.body))
+              .font(.system(size: settings.fontSize, design: .monospaced))
+              .textSelection(.enabled)
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .padding(10)
+          }
+          .background(Color(NSColor.textBackgroundColor))
+          .cornerRadius(8)
+        }
+      } else {
+        Text("无可预览内容")
+          .foregroundStyle(.secondary)
+      }
+    }
+    .frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+  }
+
+  private var activeSnippets: [Snippet] {
+    store.snippets.filter { !store.isAnyAncestorDisabled($0.groupPath) }
+  }
+
+  private var visibleChildGroups: [QuickGroup] {
+    let prefixCount = currentGroupPath.count
+    var set: [String: QuickGroup] = [:]
+
+    for path in store.groups where !store.isAnyAncestorDisabled(path) {
+      guard path.count > prefixCount else { continue }
+      guard Array(path.prefix(prefixCount)) == currentGroupPath else { continue }
+      let childPath = Array(path.prefix(prefixCount + 1))
+      let key = childPath.joined(separator: "/")
+      if set[key] == nil, let name = childPath.last {
+        set[key] = QuickGroup(path: childPath, name: name)
+      }
+    }
+
+    return set.values.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+  }
+
+  private var filteredSnippets: [Snippet] {
+    let q = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return activeSnippets.filter { s in
+      if !currentGroupPath.isEmpty, Array(s.groupPath.prefix(currentGroupPath.count)) != currentGroupPath {
+        return false
+      }
+      if q.isEmpty { return s.groupPath == currentGroupPath }
+      let text = [
+        s.name,
+        s.trigger,
+        s.groupPath.joined(separator: "/"),
+        s.keywords.joined(separator: " "),
+        s.body,
+        stripComments(s.body),
+      ].joined(separator: "\n").lowercased()
+      return text.contains(q)
+    }
+    .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+  }
+
+  private var filteredGroups: [QuickGroup] {
+    let q = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if q.isEmpty { return visibleChildGroups }
+
+    return visibleChildGroups.filter { group in
+      let full = group.path.joined(separator: "/").lowercased()
+      return group.name.lowercased().contains(q) || full.contains(q)
+    }
+  }
+
+  private var quickItems: [QuickItem] {
+    filteredGroups.map { .group($0) } + filteredSnippets.map { .snippet($0) }
+  }
+
+  private var selectedItem: QuickItem? {
+    guard let selectedItemID else { return quickItems.first }
+    return quickItems.first(where: { $0.id == selectedItemID })
+  }
+
+  private func handleSubmit() {
+    guard let id = selectedItemID,
+          let selected = quickItems.first(where: { $0.id == id }) else { return }
+
+    switch selected {
+    case .group(let group):
+      currentGroupPath = group.path
+      search = ""
+      selectedItemID = nil
+      DispatchQueue.main.async {
+        selectedItemID = quickItems.first?.id
+      }
+    case .snippet(let snippet):
+      onSubmit(snippet)
+    }
+  }
+
+  private func navigateUpOneLevel() {
+    if !currentGroupPath.isEmpty {
+      currentGroupPath = Array(currentGroupPath.dropLast())
+      search = ""
+      selectedItemID = nil
+      DispatchQueue.main.async {
+        selectedItemID = quickItems.first?.id
+      }
+    }
+  }
+
+  private func handleEscape() {
+    if !currentGroupPath.isEmpty {
+      navigateUpOneLevel()
+      return
+    }
+    onCancel()
+  }
+
+  private func snippetsInExactGroup(_ path: [String]) -> [Snippet] {
+    activeSnippets.filter { $0.groupPath == path }
+  }
+
+  private func directChildGroupCount(of path: [String]) -> Int {
+    let targetDepth = path.count + 1
+    let childPaths = store.groups.filter { group in
+      group.count == targetDepth && Array(group.prefix(path.count)) == path
+    }
+    return childPaths.count
+  }
+
+  private func isPrefixPath(_ prefix: [String], of full: [String]) -> Bool {
+    if prefix.count > full.count { return false }
+    for (idx, seg) in prefix.enumerated() where full[idx] != seg {
+      return false
+    }
+    return true
+  }
+
+  private func moveSelection(step: Int) {
+    guard !quickItems.isEmpty else {
+      selectedItemID = nil
+      return
+    }
+    guard let current = selectedItemID,
+          let currentIdx = quickItems.firstIndex(where: { $0.id == current }) else {
+      selectedItemID = quickItems.first?.id
+      return
+    }
+
+    let next = max(0, min(quickItems.count - 1, currentIdx + step))
+    selectedItemID = quickItems[next].id
+  }
+}
+
+struct QuickSearchField: NSViewRepresentable {
+  let placeholder: String
+  @Binding var text: String
+  @Binding var shouldFocus: Bool
+  let onMoveUp: () -> Void
+  let onMoveDown: () -> Void
+  let onSubmit: () -> Void
+  let onEscape: () -> Void
+
+  func makeCoordinator() -> Coordinator {
+    Coordinator(self)
+  }
+
+  func makeNSView(context: Context) -> NSTextField {
+    let field = NSTextField()
+    field.isBordered = true
+    field.bezelStyle = .roundedBezel
+    field.focusRingType = .default
+    field.usesSingleLineMode = true
+    field.lineBreakMode = .byTruncatingTail
+    field.placeholderString = placeholder
+    field.stringValue = text
+    field.delegate = context.coordinator
+    return field
+  }
+
+  func updateNSView(_ nsView: NSTextField, context: Context) {
+    if nsView.stringValue != text {
+      nsView.stringValue = text
+    }
+    nsView.placeholderString = placeholder
+
+    if shouldFocus, let window = nsView.window, window.firstResponder !== nsView.currentEditor() {
+      window.makeFirstResponder(nsView)
+      DispatchQueue.main.async {
+        shouldFocus = false
+      }
+    }
+  }
+
+  final class Coordinator: NSObject, NSTextFieldDelegate {
+    var parent: QuickSearchField
+
+    init(_ parent: QuickSearchField) {
+      self.parent = parent
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+      guard let field = notification.object as? NSTextField else { return }
+      parent.text = field.stringValue
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+      switch commandSelector {
+      case #selector(NSResponder.moveUp(_:)):
+        parent.onMoveUp()
+        return true
+      case #selector(NSResponder.moveDown(_:)):
+        parent.onMoveDown()
+        return true
+      case #selector(NSResponder.insertNewline(_:)):
+        parent.onSubmit()
+        return true
+      case #selector(NSResponder.cancelOperation(_:)):
+        parent.onEscape()
+        return true
+      default:
+        return false
+      }
     }
   }
 }
@@ -978,9 +1605,16 @@ struct SettingsView: View {
         Text("\(Int(settings.rowHeight))")
           .frame(width: 28, alignment: .trailing)
       }
+
+      HStack(spacing: 12) {
+        Text("唤醒键")
+          .frame(width: 52, alignment: .leading)
+        Text("Option + 0（当前固定）")
+          .foregroundStyle(.secondary)
+      }
     }
     .padding(16)
-    .frame(width: 460, height: 140)
+    .frame(width: 460, height: 170)
   }
 }
 
