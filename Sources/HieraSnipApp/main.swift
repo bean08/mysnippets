@@ -40,25 +40,32 @@ final class SnippetStore: ObservableObject {
   @Published var snippets: [Snippet] = []
   @Published var groups: [[String]] = []
   @Published var disabledGroupKeys: Set<String> = []
+  @Published private(set) var storageRootURL: URL
+  @Published private(set) var storageFileURL: URL
 
-  let storageRootURL: URL
-  let storageFileURL: URL
-  private let legacyFileURL: URL
-  private let legacyGroupsRootURL: URL
-  private let legacyDisabledGroupsFileURL: URL
+  private var legacyFileURL: URL
+  private var legacyGroupsRootURL: URL
+  private var legacyDisabledGroupsFileURL: URL
   private var groupIDByPathKey: [String: String] = [:]
   private var timer: Timer?
   private var lastFingerprint: String = ""
 
-  init() {
-    let doc = FileManager.default.homeDirectoryForCurrentUser
+  static func defaultStorageFilePath() -> String {
+    FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent("Documents", isDirectory: true)
       .appendingPathComponent("mysnippets", isDirectory: true)
-    self.storageRootURL = doc
-    self.storageFileURL = doc.appendingPathComponent("snippets.json", isDirectory: false)
-    self.legacyFileURL = doc.appendingPathComponent("snippets.md", isDirectory: false)
-    self.legacyGroupsRootURL = doc.appendingPathComponent("groups", isDirectory: true)
-    self.legacyDisabledGroupsFileURL = doc.appendingPathComponent("disabled-groups.json", isDirectory: false)
+      .appendingPathComponent("snippets.json", isDirectory: false)
+      .path
+  }
+
+  init(storageFilePath: String = SnippetStore.defaultStorageFilePath()) {
+    let resolved = Self.resolveStorageFileURL(from: storageFilePath)
+    let root = resolved.deletingLastPathComponent()
+    self.storageFileURL = resolved
+    self.storageRootURL = root
+    self.legacyFileURL = root.appendingPathComponent("snippets.md", isDirectory: false)
+    self.legacyGroupsRootURL = root.appendingPathComponent("groups", isDirectory: true)
+    self.legacyDisabledGroupsFileURL = root.appendingPathComponent("disabled-groups.json", isDirectory: false)
     bootstrapIfNeeded()
     reload()
     startWatcher()
@@ -66,6 +73,19 @@ final class SnippetStore: ObservableObject {
 
   deinit {
     timer?.invalidate()
+  }
+
+  func updateStorageFilePath(_ path: String) {
+    let resolved = Self.resolveStorageFileURL(from: path)
+    guard resolved != storageFileURL else { return }
+    storageFileURL = resolved
+    storageRootURL = resolved.deletingLastPathComponent()
+    legacyFileURL = storageRootURL.appendingPathComponent("snippets.md", isDirectory: false)
+    legacyGroupsRootURL = storageRootURL.appendingPathComponent("groups", isDirectory: true)
+    legacyDisabledGroupsFileURL = storageRootURL.appendingPathComponent("disabled-groups.json", isDirectory: false)
+    groupIDByPathKey = [:]
+    bootstrapIfNeeded()
+    reload()
   }
 
   func reload() {
@@ -257,6 +277,12 @@ final class SnippetStore: ObservableObject {
       return "unknown"
     }
     return "\(storageFileURL.path):\(modified.timeIntervalSince1970):\(size.intValue)"
+  }
+
+  private static func resolveStorageFileURL(from rawPath: String) -> URL {
+    let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+    let candidate = trimmed.isEmpty ? defaultStorageFilePath() : NSString(string: trimmed).expandingTildeInPath
+    return URL(fileURLWithPath: candidate, isDirectory: false)
   }
 
   private func parseLegacyMarkdown(_ raw: String, defaultGroupPath: [String]) -> [Snippet] {
@@ -577,6 +603,7 @@ final class SnippetStore: ObservableObject {
 final class UISettings: ObservableObject {
   @AppStorage("fontSize") var fontSize: Double = 13
   @AppStorage("rowHeight") var rowHeight: Double = 22
+  @AppStorage("storageFilePath") var storageFilePath: String = SnippetStore.defaultStorageFilePath()
 }
 
 final class GlobalHotKeyManager {
@@ -997,7 +1024,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct mysnippetsApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-  @StateObject private var store = SnippetStore()
+  @StateObject private var store = SnippetStore(storageFilePath: SnippetStore.defaultStorageFilePath())
   @StateObject private var settings = UISettings()
 
   var body: some Scene {
@@ -1012,12 +1039,17 @@ struct mysnippetsApp: App {
             QuickInsertController.shared.show()
           }
         }
+        .onChange(of: settings.storageFilePath) { path in
+          store.updateStorageFilePath(path)
+          QuickInsertController.shared.configure(store: store, settings: settings)
+        }
     }
     .windowResizability(.contentSize)
-    .defaultSize(width: 1150, height: 760)
+    .defaultSize(width: 1450, height: 760)
 
     Settings {
       SettingsView()
+        .environmentObject(store)
         .environmentObject(settings)
     }
   }
@@ -1525,6 +1557,7 @@ struct ContentView: View {
         }
         .environment(\.defaultMinListRowHeight, settings.rowHeight)
       }
+      .navigationSplitViewColumnWidth(min: 245, ideal: 270, max: 320)
     } content: {
       VStack(spacing: 8) {
         HStack(spacing: 8) {
@@ -1588,6 +1621,7 @@ struct ContentView: View {
           break
         }
       }
+      .navigationSplitViewColumnWidth(min: 390, ideal: 450, max: 560)
     } detail: {
       VStack(alignment: .leading, spacing: 8) {
         HStack {
@@ -1974,7 +2008,9 @@ struct GroupRenameSheet: View {
 }
 
 struct SettingsView: View {
+  @EnvironmentObject private var store: SnippetStore
   @EnvironmentObject private var settings: UISettings
+  @State private var storagePathDraft: String = ""
 
   var body: some View {
     VStack(alignment: .leading, spacing: 14) {
@@ -2003,9 +2039,42 @@ struct SettingsView: View {
         Text("Option + 0（当前固定）")
           .foregroundStyle(.secondary)
       }
+
+      VStack(alignment: .leading, spacing: 6) {
+        Text("存储文件")
+        TextField("snippets.json 路径", text: $storagePathDraft)
+          .textFieldStyle(.roundedBorder)
+        Text("填写 snippets.json 的完整路径；修改后会立即切换到该文件。支持 ~。")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        HStack(spacing: 10) {
+          Button("应用") {
+            applyStoragePath()
+          }
+          Button("恢复默认") {
+            storagePathDraft = SnippetStore.defaultStorageFilePath()
+            applyStoragePath()
+          }
+          .buttonStyle(.borderless)
+          Text(store.storageFileURL.path)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(2)
+        }
+      }
     }
     .padding(16)
-    .frame(width: 460, height: 170)
+    .frame(width: 560, height: 280)
+    .onAppear {
+      storagePathDraft = settings.storageFilePath
+    }
+  }
+
+  private func applyStoragePath() {
+    let trimmed = storagePathDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+    let next = trimmed.isEmpty ? SnippetStore.defaultStorageFilePath() : trimmed
+    storagePathDraft = next
+    settings.storageFilePath = next
   }
 }
 

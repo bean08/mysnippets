@@ -1,37 +1,60 @@
-# mysnippets (macOS)
+# mysnippets
 
-Chinese version: [README.zh.md](README.zh.md)
+[中文文档](README.zh.md) · License: [Apache-2.0](LICENSE)
 
-A native macOS prototype for Alfred-like snippets:
-- Nested group tree
-- Compact list with adjustable row height and font size
-- Optional snippet descriptions for list/search/export
-- Preview-only comments (`{{! ... }}`)
-- Raycast-like dynamic placeholders: `{cursor}` `{clipboard}` `{date}` `{time}` `{datetime}` `{uuid}`
-- Single-file JSON storage with auto reload
+`mysnippets` is a native macOS snippet manager for fast text insertion with hierarchical organization, dynamic placeholders, and a keyboard-first quick panel.
 
-## Run
+## Features
+
+- Native macOS app built with SwiftUI and AppKit
+- Three-column management UI for groups, snippets, and preview
+- Global quick insert panel with nested group navigation
+- Optional snippet descriptions for search and export
+- Preview-only comments via `{{! ... }}`
+- Raycast-like placeholders: `{cursor}`, `{clipboard}`, `{date}`, `{time}`, `{datetime}`, `{uuid}`
+- Configurable `snippets.json` storage path
+- Universal macOS packaging script for Apple Silicon and Intel
+
+## Requirements
+
+- macOS 13.0 or later
+- Xcode / Swift toolchain with Swift 5.9+
+
+## Development
 
 ```bash
 cd mysnippets
 swift run mysnippets
 ```
 
+## Packaging
+
+```bash
+cd mysnippets
+./scripts/package-macos.sh
+```
+
+Outputs:
+- `dist/mysnippets.app`
+- `dist/mysnippets.dmg`
+
+The packaging script builds both `arm64` and `x86_64` release binaries and merges them into a universal app bundle.
+
 ## Placeholders
 
-`mysnippets` supports Raycast-like dynamic placeholders in snippet bodies.
-
 Supported placeholders:
-- `{cursor}`: removed from the pasted text, then the caret moves back to this position after paste
-- `{clipboard}`: replaced with the current clipboard text
-- `{date}`: replaced with the current date using the system locale
-- `{time}`: replaced with the current time using the system locale
-- `{datetime}`: replaced with the current date and time using the system locale
-- `{uuid}`: replaced with a newly generated lowercase UUID
+
+- `{cursor}`: removed from the pasted text and restores the caret to that position after paste
+- `{clipboard}`: inserts current clipboard text
+- `{date}`: inserts current date using the system locale
+- `{time}`: inserts current time using the system locale
+- `{datetime}`: inserts current date and time using the system locale
+- `{uuid}`: inserts a newly generated lowercase UUID
 
 Notes:
-- Only one final cursor position is used. If multiple `{cursor}` placeholders exist, the last one wins.
-- Unknown placeholders are left unchanged.
+
+- If multiple `{cursor}` placeholders exist, the last one wins.
+- Unknown `{...}` placeholders are left unchanged.
 - Preview-only comments in the form `{{! ... }}` are removed before copy/paste.
 
 Example:
@@ -46,12 +69,26 @@ Summary:
 
 ## Storage
 
-Default file:
+Default storage file:
+
 - `~/Documents/mysnippets/snippets.json`
 
-Format:
-- Top-level `version`, `groups`, `snippets`
-- Nested groups via `groups[].parent_id`
-- Group hidden state via `groups[].hidden`
-- Snippet body stored as multi-line array `snippets[].body`
-- Optional snippet summary via `snippets[].description`
+The path can be changed in `Settings -> 存储文件`. Enter a full path to `snippets.json`; `~` is supported.
+
+Storage schema:
+
+- top-level keys: `version`, `groups`, `snippets`
+- nested groups via `groups[].parent_id`
+- group enabled/disabled state via `groups[].hidden`
+- multi-line body content via `snippets[].body`
+- optional snippet summary via `snippets[].description`
+
+## Release
+
+- Current version: `0.0.1` (from [`VERSION`](VERSION))
+- Recommended Git tag: `v0.0.1`
+- Release notes: [CHANGELOG.md](CHANGELOG.md)
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
