@@ -9,12 +9,20 @@ DIST_DIR="$ROOT_DIR/dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
+RESOURCES_DIR="$CONTENTS_DIR/Resources"
 UNIVERSAL_BINARY="$MACOS_DIR/$APP_NAME"
 INFO_PLIST="$CONTENTS_DIR/Info.plist"
 ARM_BINARY="$ROOT_DIR/.build/arm64-apple-macosx/release/$APP_NAME"
 X64_BINARY="$ROOT_DIR/.build/x86_64-apple-macosx/release/$APP_NAME"
 DMG_PATH="$DIST_DIR/$APP_NAME.dmg"
 VOL_NAME="$APP_NAME"
+ICON_ICNS="$RESOURCES_DIR/AppIcon.icns"
+ICONSET_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mysnippets.iconset.XXXXXX")/AppIcon.iconset"
+
+cleanup() {
+  rm -rf "${ICONSET_DIR%/AppIcon.iconset}"
+}
+trap cleanup EXIT
 
 mkdir -p "$DIST_DIR"
 
@@ -22,10 +30,13 @@ swift build -c release --arch arm64
 swift build -c release --arch x86_64
 
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 lipo -create "$ARM_BINARY" "$X64_BINARY" -output "$UNIVERSAL_BINARY"
 chmod +x "$UNIVERSAL_BINARY"
+
+swift "$ROOT_DIR/scripts/export-icon.swift" "$ICONSET_DIR"
+iconutil -c icns "$ICONSET_DIR" -o "$ICON_ICNS"
 
 cat > "$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -40,6 +51,8 @@ cat > "$INFO_PLIST" <<PLIST
   <string>com.local.mysnippets</string>
   <key>CFBundleName</key>
   <string>mysnippets</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

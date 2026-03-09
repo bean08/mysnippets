@@ -960,6 +960,28 @@ final class QuickSearchPanel: NSPanel {
   override var canBecomeMain: Bool { false }
 }
 
+struct WindowAccessor: NSViewRepresentable {
+  let onResolve: (NSWindow) -> Void
+
+  func makeNSView(context: Context) -> NSView {
+    let view = NSView()
+    DispatchQueue.main.async {
+      if let window = view.window {
+        onResolve(window)
+      }
+    }
+    return view
+  }
+
+  func updateNSView(_ nsView: NSView, context: Context) {
+    DispatchQueue.main.async {
+      if let window = nsView.window {
+        onResolve(window)
+      }
+    }
+  }
+}
+
 enum AppIconFactory {
   static func makeIcon(size: CGFloat = 512) -> NSImage {
     let image = NSImage(size: NSSize(width: size, height: size))
@@ -1011,13 +1033,107 @@ enum AppIconFactory {
     image.isTemplate = false
     return image
   }
+
+  static func makeStatusBarIcon() -> NSImage {
+    let image = makeIcon(size: 36)
+    image.size = NSSize(width: 18, height: 18)
+    return image
+  }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+  private var statusItem: NSStatusItem?
+  private weak var mainWindow: NSWindow?
+  private var configuredWindowIDs: Set<ObjectIdentifier> = []
+
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)
     NSApp.applicationIconImage = AppIconFactory.makeIcon()
+    installStatusItem()
     NSApp.activate(ignoringOtherApps: true)
+  }
+
+  func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+    if !flag {
+      showMainWindow()
+    }
+    return true
+  }
+
+  func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+    false
+  }
+
+  func registerMainWindow(_ window: NSWindow) {
+    mainWindow = window
+    let windowID = ObjectIdentifier(window)
+    if !configuredWindowIDs.contains(windowID) {
+      configuredWindowIDs.insert(windowID)
+      window.delegate = self
+      applyAdaptiveInitialSize(to: window)
+    }
+  }
+
+  func windowShouldClose(_ sender: NSWindow) -> Bool {
+    if sender == mainWindow {
+      hideToMenuBar()
+      return false
+    }
+    return true
+  }
+
+  @objc private func openFromStatusItem(_ sender: Any?) {
+    showMainWindow()
+  }
+
+  @objc private func quickInsertFromStatusItem(_ sender: Any?) {
+    QuickInsertController.shared.show()
+  }
+
+  @objc private func quitFromStatusItem(_ sender: Any?) {
+    NSApp.terminate(nil)
+  }
+
+  private func installStatusItem() {
+    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    if let button = item.button {
+      button.image = AppIconFactory.makeStatusBarIcon()
+      button.imagePosition = .imageOnly
+      button.toolTip = "mysnippets"
+    }
+
+    let menu = NSMenu()
+    menu.addItem(NSMenuItem(title: "Open mysnippets", action: #selector(openFromStatusItem(_:)), keyEquivalent: ""))
+    menu.addItem(NSMenuItem(title: "Quick Insert", action: #selector(quickInsertFromStatusItem(_:)), keyEquivalent: ""))
+    menu.addItem(.separator())
+    menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitFromStatusItem(_:)), keyEquivalent: "q"))
+    menu.items.forEach { $0.target = self }
+    item.menu = menu
+    statusItem = item
+  }
+
+  private func showMainWindow() {
+    NSApp.setActivationPolicy(.regular)
+    if let mainWindow {
+      mainWindow.makeKeyAndOrderFront(nil)
+      mainWindow.orderFrontRegardless()
+    }
+    NSApp.activate(ignoringOtherApps: true)
+  }
+
+  private func hideToMenuBar() {
+    NSApp.windows.forEach { $0.orderOut(nil) }
+    NSApp.setActivationPolicy(.accessory)
+  }
+
+  private func applyAdaptiveInitialSize(to window: NSWindow) {
+    guard let screen = window.screen ?? NSScreen.main else { return }
+    let visibleFrame = screen.visibleFrame
+    let targetWidth = min(1165, max(900, floor(visibleFrame.width * 0.59)))
+    let targetHeight = min(760, max(700, floor(visibleFrame.height * 0.80)))
+    let size = NSSize(width: targetWidth, height: targetHeight)
+    window.setContentSize(size)
+    window.center()
   }
 }
 
@@ -1032,6 +1148,11 @@ struct mysnippetsApp: App {
       ContentView()
         .environmentObject(store)
         .environmentObject(settings)
+        .background(
+          WindowAccessor { window in
+            appDelegate.registerMainWindow(window)
+          }
+        )
         .onAppear {
           QuickInsertController.shared.configure(store: store, settings: settings)
           GlobalHotKeyManager.shared.registerIfNeeded()
@@ -1045,7 +1166,7 @@ struct mysnippetsApp: App {
         }
     }
     .windowResizability(.contentSize)
-    .defaultSize(width: 1450, height: 760)
+    .defaultSize(width: 950, height: 740)
 
     Settings {
       SettingsView()
@@ -1621,7 +1742,7 @@ struct ContentView: View {
           break
         }
       }
-      .navigationSplitViewColumnWidth(min: 390, ideal: 450, max: 560)
+      .navigationSplitViewColumnWidth(min: 330, ideal: 382, max: 476)
     } detail: {
       VStack(alignment: .leading, spacing: 8) {
         HStack {
