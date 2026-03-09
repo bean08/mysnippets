@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Carbon.HIToolbox
 import Foundation
 import SwiftUI
@@ -8,7 +9,6 @@ struct Snippet: Identifiable, Codable, Hashable {
   var name: String
   var trigger: String
   var groupPath: [String]
-  var keywords: [String]
   var body: String
 }
 
@@ -41,9 +41,11 @@ final class SnippetStore: ObservableObject {
   @Published var disabledGroupKeys: Set<String> = []
 
   let storageRootURL: URL
+  let storageFileURL: URL
   private let legacyFileURL: URL
-  private let disabledGroupsFileURL: URL
-  private var fileURLBySnippetID: [String: URL] = [:]
+  private let legacyGroupsRootURL: URL
+  private let legacyDisabledGroupsFileURL: URL
+  private var groupIDByPathKey: [String: String] = [:]
   private var timer: Timer?
   private var lastFingerprint: String = ""
 
@@ -51,9 +53,11 @@ final class SnippetStore: ObservableObject {
     let doc = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent("Documents", isDirectory: true)
       .appendingPathComponent("mysnippets", isDirectory: true)
-    self.storageRootURL = doc.appendingPathComponent("groups", isDirectory: true)
+    self.storageRootURL = doc
+    self.storageFileURL = doc.appendingPathComponent("snippets.json", isDirectory: false)
     self.legacyFileURL = doc.appendingPathComponent("snippets.md", isDirectory: false)
-    self.disabledGroupsFileURL = doc.appendingPathComponent("disabled-groups.json", isDirectory: false)
+    self.legacyGroupsRootURL = doc.appendingPathComponent("groups", isDirectory: true)
+    self.legacyDisabledGroupsFileURL = doc.appendingPathComponent("disabled-groups.json", isDirectory: false)
     bootstrapIfNeeded()
     reload()
     startWatcher()
@@ -65,67 +69,58 @@ final class SnippetStore: ObservableObject {
 
   func reload() {
     try? FileManager.default.createDirectory(at: storageRootURL, withIntermediateDirectories: true)
+    migrateLegacyIfNeeded()
 
-    migrateIfNeeded()
-
-    let files = listSnippetFiles()
-    var loadedSnippets: [Snippet] = []
-    var loadedGroups = Set<String>()
-    var loadedFileMap: [String: URL] = [:]
-
-    for file in files {
-      let groupPath = groupPathForSnippetFile(file)
-      loadedGroups.insert(pathKey(groupPath))
-      if let raw = try? String(contentsOf: file, encoding: .utf8) {
-        let parsed = parseMarkdown(raw, defaultGroupPath: groupPath)
-        for snippet in parsed {
-          var next = snippet
-          next.groupPath = normalizeGroupPath(next.groupPath)
-          loadedSnippets.append(next)
-          loadedFileMap[next.id] = file
-        }
-      }
-    }
-    for group in discoverGroupPaths(from: loadedSnippets) {
-      loadedGroups.insert(pathKey(group))
+    guard
+      let data = try? Data(contentsOf: storageFileURL),
+      let disk = try? JSONDecoder().decode(DiskStore.self, from: data)
+    else {
+      snippets = []
+      groups = []
+      disabledGroupKeys = []
+      groupIDByPathKey = [:]
+      lastFingerprint = fingerprint()
+      return
     }
 
-    loadedSnippets.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-    snippets = loadedSnippets
-    groups = loadedGroups.map { keyToPath($0) }.sorted(by: comparePath)
-    fileURLBySnippetID = loadedFileMap
-    disabledGroupKeys = loadDisabledGroupKeys()
+    let loaded = decodeDiskStore(disk)
+    snippets = loaded.snippets.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    groups = loaded.groups.sorted(by: comparePath)
+    disabledGroupKeys = loaded.disabledKeys
+    groupIDByPathKey = loaded.groupIDByPathKey
     lastFingerprint = fingerprint()
   }
 
   func upsert(_ snippet: Snippet) {
+    var next = snippets
     var normalized = snippet
     normalized.groupPath = normalizeGroupPath(snippet.groupPath)
-    let target = snippetFileURL(for: normalized)
-    let targetDir = target.deletingLastPathComponent()
-    try? FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
-    try? serializeMarkdown([normalized]).write(to: target, atomically: true, encoding: .utf8)
-
-    if let old = fileURLBySnippetID[normalized.id], old.path != target.path {
-      try? FileManager.default.removeItem(at: old)
+    if let idx = next.firstIndex(where: { $0.id == normalized.id }) {
+      next[idx] = normalized
+    } else {
+      next.append(normalized)
     }
-
-    ensureGroupExists(normalized.groupPath)
-    cleanupEmptyDirs()
+    persist(snippets: next, groups: groups, disabledKeys: disabledGroupKeys)
     reload()
   }
 
   func remove(_ snippet: Snippet) {
-    if let file = fileURLBySnippetID[snippet.id] {
-      try? FileManager.default.removeItem(at: file)
-    }
-    cleanupEmptyDirs()
+    let next = snippets.filter { $0.id != snippet.id }
+    persist(snippets: next, groups: groups, disabledKeys: disabledGroupKeys)
     reload()
   }
 
   func createGroup(_ path: [String]) {
     let normalized = normalizeGroupPath(path)
-    ensureGroupExists(normalized)
+    var nextGroups = Set(groups.map(pathKey))
+    for depth in 0..<normalized.count {
+      nextGroups.insert(pathKey(Array(normalized.prefix(depth + 1))))
+    }
+    persist(
+      snippets: snippets,
+      groups: nextGroups.map(keyToPath),
+      disabledKeys: disabledGroupKeys
+    )
     reload()
   }
 
@@ -133,7 +128,7 @@ final class SnippetStore: ObservableObject {
     let key = pathKey(normalizeGroupPath(path))
     var next = disabledGroupKeys
     next.insert(key)
-    saveDisabledGroupKeys(next)
+    persist(snippets: snippets, groups: groups, disabledKeys: next)
     disabledGroupKeys = next
   }
 
@@ -141,7 +136,7 @@ final class SnippetStore: ObservableObject {
     let key = pathKey(normalizeGroupPath(path))
     var next = disabledGroupKeys
     next.remove(key)
-    saveDisabledGroupKeys(next)
+    persist(snippets: snippets, groups: groups, disabledKeys: next)
     disabledGroupKeys = next
   }
 
@@ -168,11 +163,16 @@ final class SnippetStore: ObservableObject {
     let newPath = parent + [trimmed]
     if newPath == normalizedOld { return }
 
-    let oldDir = groupDirURL(for: normalizedOld)
-    let newDir = groupDirURL(for: newPath)
-    try? FileManager.default.createDirectory(at: newDir.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try? FileManager.default.moveItem(at: oldDir, to: newDir)
-
+    let nextSnippets = snippets.map { snippet -> Snippet in
+      guard hasPrefix(snippet.groupPath, prefix: normalizedOld) else { return snippet }
+      var next = snippet
+      next.groupPath = newPath + Array(snippet.groupPath.dropFirst(normalizedOld.count))
+      return next
+    }
+    let nextGroups = groups.map { path -> [String] in
+      guard hasPrefix(path, prefix: normalizedOld) else { return path }
+      return newPath + Array(path.dropFirst(normalizedOld.count))
+    }
     var nextDisabled = Set<String>()
     for key in disabledGroupKeys {
       let path = keyToPath(key)
@@ -183,29 +183,36 @@ final class SnippetStore: ObservableObject {
         nextDisabled.insert(key)
       }
     }
-    saveDisabledGroupKeys(nextDisabled)
-    disabledGroupKeys = nextDisabled
+    var nextGroupIDMap: [String: String] = [:]
+    for (key, id) in groupIDByPathKey {
+      let path = keyToPath(key)
+      if hasPrefix(path, prefix: normalizedOld) {
+        let replaced = newPath + Array(path.dropFirst(normalizedOld.count))
+        nextGroupIDMap[pathKey(replaced)] = id
+      } else {
+        nextGroupIDMap[key] = id
+      }
+    }
+    groupIDByPathKey = nextGroupIDMap
 
-    cleanupEmptyDirs()
+    persist(snippets: nextSnippets, groups: nextGroups, disabledKeys: nextDisabled)
     reload()
   }
 
   func deleteGroup(_ path: [String]) {
     let normalized = normalizeGroupPath(path)
-    let dir = groupDirURL(for: normalized)
-    try? FileManager.default.removeItem(at: dir)
-
+    let nextSnippets = snippets.filter { !hasPrefix($0.groupPath, prefix: normalized) }
+    let nextGroups = groups.filter { !hasPrefix($0, prefix: normalized) }
     let nextDisabled = Set(disabledGroupKeys.filter { !hasPrefix(keyToPath($0), prefix: normalized) })
-    saveDisabledGroupKeys(nextDisabled)
+    groupIDByPathKey = groupIDByPathKey.filter { !hasPrefix(keyToPath($0.key), prefix: normalized) }
+    persist(snippets: nextSnippets, groups: nextGroups, disabledKeys: nextDisabled)
     disabledGroupKeys = nextDisabled
-
-    cleanupEmptyDirs()
     reload()
   }
 
   private func bootstrapIfNeeded() {
     try? FileManager.default.createDirectory(at: storageRootURL, withIntermediateDirectories: true)
-    guard listSnippetFiles().isEmpty, !FileManager.default.fileExists(atPath: legacyFileURL.path) else { return }
+    guard !FileManager.default.fileExists(atPath: storageFileURL.path), !hasLegacyData() else { return }
 
     let seed: [Snippet] = [
       Snippet(
@@ -213,7 +220,6 @@ final class SnippetStore: ObservableObject {
         name: "Conventional Commit (CN)",
         trigger: ";gcc",
         groupPath: ["Engineering", "Git", "Commit", "Templates"],
-        keywords: ["git", "commit"],
         body: "feat(scope): 简要说明\\n\\n{{! 发布前删除占位信息，复制时会自动删除此注释。}}\\n背景：...\\n影响范围：...\\n回滚方案：..."
       ),
       Snippet(
@@ -221,17 +227,10 @@ final class SnippetStore: ObservableObject {
         name: "Daily Sync Update",
         trigger: ";dsu",
         groupPath: ["Work", "Sync", "Daily", "Standup"],
-        keywords: ["daily", "sync"],
         body: "Yesterday:\\n- ...\\n\\nToday:\\n- ...\\n\\nBlockers:\\n- ...\\n{{! 预览提醒：别忘记 KPI。}}"
       )
     ]
-    for snippet in seed {
-      var s = snippet
-      s.groupPath = normalizeGroupPath(s.groupPath)
-      ensureGroupExists(s.groupPath)
-      let file = snippetFileURL(for: s)
-      try? serializeMarkdown([s]).write(to: file, atomically: true, encoding: .utf8)
-    }
+    persist(snippets: seed, groups: [], disabledKeys: [])
   }
 
   private func startWatcher() {
@@ -246,20 +245,18 @@ final class SnippetStore: ObservableObject {
   }
 
   private func fingerprint() -> String {
-    let files = listSnippetFiles() + listGroupMarkerFiles()
-    if files.isEmpty { return "missing" }
-    var parts: [String] = []
-    for file in files.sorted(by: { $0.path < $1.path }) {
-      if let attrs = try? FileManager.default.attributesOfItem(atPath: file.path),
-         let modified = attrs[.modificationDate] as? Date,
-         let size = attrs[.size] as? NSNumber {
-        parts.append("\(file.path):\(modified.timeIntervalSince1970):\(size.intValue)")
-      }
+    guard FileManager.default.fileExists(atPath: storageFileURL.path) else { return "missing" }
+    guard
+      let attrs = try? FileManager.default.attributesOfItem(atPath: storageFileURL.path),
+      let modified = attrs[.modificationDate] as? Date,
+      let size = attrs[.size] as? NSNumber
+    else {
+      return "unknown"
     }
-    return parts.joined(separator: "|")
+    return "\(storageFileURL.path):\(modified.timeIntervalSince1970):\(size.intValue)"
   }
 
-  private func parseMarkdown(_ raw: String, defaultGroupPath: [String]) -> [Snippet] {
+  private func parseLegacyMarkdown(_ raw: String, defaultGroupPath: [String]) -> [Snippet] {
     let pattern = "<!-- HIERASNIP:BEGIN (.+?) -->\\n([\\s\\S]*?)\\n<!-- HIERASNIP:END -->"
     guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
     let nsRange = NSRange(raw.startIndex..<raw.endIndex, in: raw)
@@ -271,7 +268,7 @@ final class SnippetStore: ObservableObject {
         let data = raw[metaRange].data(using: .utf8)
       else { return nil }
 
-      struct Meta: Codable { let id: String; let name: String; let trigger: String?; let groupPath: [String]?; let keywords: [String]? }
+      struct Meta: Codable { let id: String; let name: String; let trigger: String?; let groupPath: [String]? }
       guard let meta = try? JSONDecoder().decode(Meta.self, from: data) else { return nil }
 
       return Snippet(
@@ -279,36 +276,9 @@ final class SnippetStore: ObservableObject {
         name: meta.name,
         trigger: meta.trigger ?? "",
         groupPath: normalizeGroupPath(meta.groupPath ?? defaultGroupPath),
-        keywords: meta.keywords ?? [],
         body: String(raw[bodyRange])
       )
     }
-  }
-
-  private func serializeMarkdown(_ snippets: [Snippet]) -> String {
-    var out: [String] = []
-    out.append("# mysnippets Snippet File")
-    out.append("")
-    out.append("Auto-managed markdown storage for a single snippet.")
-    out.append("")
-
-    for s in snippets {
-      let meta: [String: Any] = [
-        "id": s.id,
-        "name": s.name,
-        "trigger": s.trigger,
-        "groupPath": s.groupPath,
-        "keywords": s.keywords,
-      ]
-      let metaData = (try? JSONSerialization.data(withJSONObject: meta, options: [])) ?? Data("{}".utf8)
-      let metaText = String(decoding: metaData, as: UTF8.self)
-      out.append("<!-- HIERASNIP:BEGIN \(metaText) -->")
-      out.append(s.body)
-      out.append("<!-- HIERASNIP:END -->")
-      out.append("")
-    }
-
-    return out.joined(separator: "\n")
   }
 
   private func normalizeGroupPath(_ path: [String]) -> [String] {
@@ -337,31 +307,8 @@ final class SnippetStore: ObservableObject {
     a.joined(separator: "/").localizedStandardCompare(b.joined(separator: "/")) == .orderedAscending
   }
 
-  private func groupDirURL(for path: [String]) -> URL {
-    var dir = storageRootURL
-    for seg in path {
-      dir.appendPathComponent(seg, isDirectory: true)
-    }
-    return dir
-  }
-
-  private func groupMarkerURL(for path: [String]) -> URL {
-    groupDirURL(for: path).appendingPathComponent("_group.md", isDirectory: false)
-  }
-
-  private func snippetFileURL(for snippet: Snippet) -> URL {
-    groupDirURL(for: snippet.groupPath).appendingPathComponent("\(snippet.id).md", isDirectory: false)
-  }
-
-  private func groupPathForSnippetFile(_ file: URL) -> [String] {
-    let relative = file.deletingLastPathComponent().path.replacingOccurrences(of: storageRootURL.path + "/", with: "")
-    if relative == file.deletingLastPathComponent().path { return ["未分组"] }
-    let parts = relative.split(separator: "/").map(String.init).filter { !$0.isEmpty }
-    return normalizeGroupPath(parts)
-  }
-
-  private func listSnippetFiles() -> [URL] {
-    guard let e = FileManager.default.enumerator(at: storageRootURL, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
+  private func listLegacySnippetFiles() -> [URL] {
+    guard let e = FileManager.default.enumerator(at: legacyGroupsRootURL, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
       return []
     }
     var result: [URL] = []
@@ -371,121 +318,253 @@ final class SnippetStore: ObservableObject {
     return result
   }
 
-  private func listGroupMarkerFiles() -> [URL] {
-    guard let e = FileManager.default.enumerator(at: storageRootURL, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
+  private func listLegacyGroupMarkerFiles() -> [URL] {
+    guard let e = FileManager.default.enumerator(at: legacyGroupsRootURL, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
       return []
     }
     var result: [URL] = []
-    for case let file as URL in e where file.lastPathComponent == "_group.md" {
+    for case let file as URL in e where file.lastPathComponent == "_group.md" || file.lastPathComponent == "group.md" {
       result.append(file)
     }
     return result
   }
 
-  private func discoverGroupPaths(from snippets: [Snippet]) -> [[String]] {
-    var set = Set<String>()
-    for snippet in snippets {
-      for depth in 0..<snippet.groupPath.count {
-        let p = Array(snippet.groupPath.prefix(depth + 1))
-        set.insert(pathKey(p))
-      }
-    }
-    for marker in listGroupMarkerFiles() {
-      let path = groupPathForSnippetFile(marker)
-      for depth in 0..<path.count {
-        let p = Array(path.prefix(depth + 1))
-        set.insert(pathKey(p))
-      }
-    }
-    return set.map(keyToPath).sorted(by: comparePath)
+  private func legacyGroupPathForFile(_ file: URL) -> [String] {
+    let dir = file.deletingLastPathComponent()
+    let relative = dir.path.replacingOccurrences(of: legacyGroupsRootURL.path + "/", with: "")
+    if relative == dir.path { return ["未分组"] }
+    return normalizeGroupPath(relative.split(separator: "/").map(String.init))
   }
 
-  private func ensureGroupExists(_ path: [String]) {
-    let normalized = normalizeGroupPath(path)
-    let dir = groupDirURL(for: normalized)
-    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    if !FileManager.default.fileExists(atPath: groupMarkerURL(for: normalized).path) {
-      try? "# Group Marker\n".write(to: groupMarkerURL(for: normalized), atomically: true, encoding: .utf8)
-    }
-  }
-
-  private func migrateIfNeeded() {
-    let groupFiles = listLegacyGroupFiles()
-    if !groupFiles.isEmpty {
-      for gf in groupFiles {
-        let gp = groupPathForLegacyGroupFile(gf)
-        if let raw = try? String(contentsOf: gf, encoding: .utf8) {
-          let parsed = parseMarkdown(raw, defaultGroupPath: gp)
-          ensureGroupExists(gp)
-          for snippet in parsed {
-            var s = snippet
-            s.groupPath = normalizeGroupPath(s.groupPath)
-            let file = snippetFileURL(for: s)
-            if !FileManager.default.fileExists(atPath: file.path) {
-              try? serializeMarkdown([s]).write(to: file, atomically: true, encoding: .utf8)
-            }
-          }
-        }
-        try? FileManager.default.removeItem(at: gf)
-      }
-      cleanupEmptyDirs()
-    }
-
-    let snippetFiles = listSnippetFiles()
-    if !snippetFiles.isEmpty { return }
-
-    if let raw = try? String(contentsOf: legacyFileURL, encoding: .utf8) {
-      let parsed = parseMarkdown(raw, defaultGroupPath: ["未分组"])
-      for snippet in parsed {
-        var s = snippet
-        s.groupPath = normalizeGroupPath(s.groupPath)
-        ensureGroupExists(s.groupPath)
-        try? serializeMarkdown([s]).write(to: snippetFileURL(for: s), atomically: true, encoding: .utf8)
-      }
-    }
-  }
-
-  private func loadDisabledGroupKeys() -> Set<String> {
-    guard let data = try? Data(contentsOf: disabledGroupsFileURL),
-          let arr = try? JSONDecoder().decode([String].self, from: data) else {
+  private func loadLegacyDisabledGroupKeys() -> Set<String> {
+    guard
+      let data = try? Data(contentsOf: legacyDisabledGroupsFileURL),
+      let arr = try? JSONDecoder().decode([String].self, from: data)
+    else {
       return []
     }
     return Set(arr)
   }
 
-  private func saveDisabledGroupKeys(_ keys: Set<String>) {
-    let arr = Array(keys).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-    if let data = try? JSONEncoder().encode(arr) {
-      try? data.write(to: disabledGroupsFileURL, options: .atomic)
-    }
+  private func hasLegacyData() -> Bool {
+    if FileManager.default.fileExists(atPath: legacyFileURL.path) { return true }
+    if FileManager.default.fileExists(atPath: legacyDisabledGroupsFileURL.path) { return true }
+    return !listLegacySnippetFiles().isEmpty || !listLegacyGroupMarkerFiles().isEmpty
   }
 
-  private func listLegacyGroupFiles() -> [URL] {
-    guard let e = FileManager.default.enumerator(at: storageRootURL, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
-      return []
-    }
-    var result: [URL] = []
-    for case let file as URL in e where file.lastPathComponent == "group.md" {
-      result.append(file)
-    }
-    return result
-  }
+  private func migrateLegacyIfNeeded() {
+    guard !FileManager.default.fileExists(atPath: storageFileURL.path) else { return }
+    guard hasLegacyData() else { return }
 
-  private func groupPathForLegacyGroupFile(_ file: URL) -> [String] {
-    groupPathForSnippetFile(file)
-  }
+    var migratedSnippets: [Snippet] = []
+    var groupSet = Set<String>()
 
-  private func cleanupEmptyDirs() {
-    guard let e = FileManager.default.enumerator(at: storageRootURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles], errorHandler: nil) else {
-      return
-    }
-    let dirs = (e.allObjects as? [URL] ?? []).sorted { $0.path.count > $1.path.count }
-    for dir in dirs {
-      var isDir: ObjCBool = false
-      if FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue,
-         (try? FileManager.default.contentsOfDirectory(atPath: dir.path).isEmpty) == true {
-        try? FileManager.default.removeItem(at: dir)
+    for file in listLegacySnippetFiles() {
+      let groupPath = legacyGroupPathForFile(file)
+      groupSet.insert(pathKey(groupPath))
+      guard let raw = try? String(contentsOf: file, encoding: .utf8) else { continue }
+      for snippet in parseLegacyMarkdown(raw, defaultGroupPath: groupPath) {
+        var next = snippet
+        next.groupPath = normalizeGroupPath(next.groupPath)
+        migratedSnippets.append(next)
       }
+    }
+
+    for marker in listLegacyGroupMarkerFiles() {
+      let path = legacyGroupPathForFile(marker)
+      for depth in 0..<path.count {
+        groupSet.insert(pathKey(Array(path.prefix(depth + 1))))
+      }
+    }
+
+    if migratedSnippets.isEmpty, let raw = try? String(contentsOf: legacyFileURL, encoding: .utf8) {
+      for snippet in parseLegacyMarkdown(raw, defaultGroupPath: ["未分组"]) {
+        var next = snippet
+        next.groupPath = normalizeGroupPath(next.groupPath)
+        migratedSnippets.append(next)
+      }
+    }
+
+    for snippet in migratedSnippets {
+      for depth in 0..<snippet.groupPath.count {
+        groupSet.insert(pathKey(Array(snippet.groupPath.prefix(depth + 1))))
+      }
+    }
+
+    let migratedDisabled = loadLegacyDisabledGroupKeys()
+    persist(
+      snippets: migratedSnippets,
+      groups: groupSet.map(keyToPath),
+      disabledKeys: migratedDisabled
+    )
+  }
+
+  private func persist(snippets: [Snippet], groups: [[String]], disabledKeys: Set<String>) {
+    let normalizedSnippets = snippets.map { snippet -> Snippet in
+      var next = snippet
+      next.groupPath = normalizeGroupPath(snippet.groupPath)
+      return next
+    }
+
+    var groupSet = Set(groups.map(pathKey))
+    for snippet in normalizedSnippets {
+      for depth in 0..<snippet.groupPath.count {
+        groupSet.insert(pathKey(Array(snippet.groupPath.prefix(depth + 1))))
+      }
+    }
+
+    let orderedGroups = groupSet.map(keyToPath).sorted(by: comparePath)
+    var nextGroupIDByPathKey: [String: String] = [:]
+    for path in orderedGroups {
+      let key = pathKey(path)
+      nextGroupIDByPathKey[key] = groupIDByPathKey[key] ?? UUID().uuidString
+    }
+
+    var nextGroupOrderByParent: [String: Int] = [:]
+    var diskGroups: [DiskGroup] = []
+    for path in orderedGroups {
+      guard let id = nextGroupIDByPathKey[pathKey(path)], let name = path.last else { continue }
+      let parent = Array(path.dropLast())
+      let parentKey = pathKey(parent)
+      let order = nextGroupOrderByParent[parentKey, default: 0]
+      nextGroupOrderByParent[parentKey] = order + 1
+      diskGroups.append(DiskGroup(
+        id: id,
+        name: name,
+        parentID: parent.isEmpty ? nil : nextGroupIDByPathKey[parentKey],
+        hidden: disabledKeys.contains(pathKey(path)),
+        order: order
+      ))
+    }
+
+    let sortedSnippets = normalizedSnippets.sorted { lhs, rhs in
+      let g1 = pathKey(lhs.groupPath)
+      let g2 = pathKey(rhs.groupPath)
+      if g1 != g2 { return g1.localizedStandardCompare(g2) == .orderedAscending }
+      return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+    }
+
+    var nextSnippetOrderByGroupID: [String: Int] = [:]
+    var diskSnippets: [DiskSnippet] = []
+    for snippet in sortedSnippets {
+      let key = pathKey(snippet.groupPath)
+      guard let groupID = nextGroupIDByPathKey[key] else { continue }
+      let order = nextSnippetOrderByGroupID[groupID, default: 0]
+      nextSnippetOrderByGroupID[groupID] = order + 1
+      diskSnippets.append(DiskSnippet(
+        id: snippet.id,
+        name: snippet.name,
+        prefix: snippet.trigger,
+        body: snippet.body.components(separatedBy: "\n"),
+        description: nil,
+        groupID: groupID,
+        order: order
+      ))
+    }
+
+    let disk = DiskStore(version: "1.0", groups: diskGroups, snippets: diskSnippets)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    guard let data = try? encoder.encode(disk) else { return }
+    try? data.write(to: storageFileURL, options: .atomic)
+    groupIDByPathKey = nextGroupIDByPathKey
+  }
+
+  private func decodeDiskStore(_ disk: DiskStore) -> (snippets: [Snippet], groups: [[String]], disabledKeys: Set<String>, groupIDByPathKey: [String: String]) {
+    let groupByID = Dictionary(uniqueKeysWithValues: disk.groups.map { ($0.id, $0) })
+    var pathCache: [String: [String]] = [:]
+
+    func resolvePath(_ id: String, visiting: Set<String> = []) -> [String]? {
+      if let cached = pathCache[id] { return cached }
+      if visiting.contains(id) { return nil }
+      guard let group = groupByID[id] else { return nil }
+
+      let path: [String]
+      if let parentID = group.parentID {
+        guard let parentPath = resolvePath(parentID, visiting: visiting.union([id])) else { return nil }
+        path = normalizeGroupPath(parentPath + [group.name])
+      } else {
+        path = normalizeGroupPath([group.name])
+      }
+      pathCache[id] = path
+      return path
+    }
+
+    var loadedGroups = Set<String>()
+    var loadedDisabledKeys = Set<String>()
+    var loadedGroupIDByPathKey: [String: String] = [:]
+    for group in disk.groups {
+      guard let path = resolvePath(group.id) else { continue }
+      let key = pathKey(path)
+      loadedGroups.insert(key)
+      loadedGroupIDByPathKey[key] = group.id
+      if group.hidden {
+        loadedDisabledKeys.insert(key)
+      }
+    }
+
+    var loadedSnippets: [Snippet] = []
+    for snippet in disk.snippets {
+      let path = resolvePath(snippet.groupID) ?? ["未分组"]
+      for depth in 0..<path.count {
+        loadedGroups.insert(pathKey(Array(path.prefix(depth + 1))))
+      }
+      loadedSnippets.append(Snippet(
+        id: snippet.id,
+        name: snippet.name,
+        trigger: snippet.prefix,
+        groupPath: path,
+        body: snippet.body.joined(separator: "\n")
+      ))
+    }
+
+    return (
+      snippets: loadedSnippets,
+      groups: loadedGroups.map(keyToPath),
+      disabledKeys: loadedDisabledKeys,
+      groupIDByPathKey: loadedGroupIDByPathKey
+    )
+  }
+
+  private struct DiskStore: Codable {
+    let version: String
+    let groups: [DiskGroup]
+    let snippets: [DiskSnippet]
+  }
+
+  private struct DiskGroup: Codable {
+    let id: String
+    let name: String
+    let parentID: String?
+    let hidden: Bool
+    let order: Int
+
+    enum CodingKeys: String, CodingKey {
+      case id
+      case name
+      case parentID = "parent_id"
+      case hidden
+      case order
+    }
+  }
+
+  private struct DiskSnippet: Codable {
+    let id: String
+    let name: String
+    let prefix: String
+    let body: [String]
+    let description: String?
+    let groupID: String
+    let order: Int
+
+    enum CodingKeys: String, CodingKey {
+      case id
+      case name
+      case prefix
+      case body
+      case description
+      case groupID = "group_id"
+      case order
     }
   }
 }
@@ -580,9 +659,33 @@ final class QuickInsertController {
   private var panel: NSPanel?
   private var host: NSHostingController<AnyView>?
   private var previousActiveApp: NSRunningApplication?
+  private var lastExternalActiveApp: NSRunningApplication?
+  private var workspaceObserver: NSObjectProtocol?
+  private var hasShownAccessibilityAlert = false
+  private var hasShownAutomationAlert = false
+  private var hasShownPasteFailedAlert = false
   private var presentationID = UUID()
 
-  private init() {}
+  private init() {
+    workspaceObserver = NotificationCenter.default.addObserver(
+      forName: NSWorkspace.didActivateApplicationNotification,
+      object: NSWorkspace.shared,
+      queue: .main
+    ) { [weak self] notification in
+      guard
+        let self,
+        let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+        app != NSRunningApplication.current
+      else { return }
+      self.lastExternalActiveApp = app
+    }
+  }
+
+  deinit {
+    if let workspaceObserver {
+      NotificationCenter.default.removeObserver(workspaceObserver)
+    }
+  }
 
   func configure(store: SnippetStore, settings: UISettings) {
     self.store = store
@@ -592,7 +695,13 @@ final class QuickInsertController {
 
   func show() {
     guard let store, let settings else { return }
-    previousActiveApp = NSWorkspace.shared.frontmostApplication
+    let frontmost = NSWorkspace.shared.frontmostApplication
+    if let frontmost, frontmost != NSRunningApplication.current {
+      previousActiveApp = frontmost
+      lastExternalActiveApp = frontmost
+    } else {
+      previousActiveApp = lastExternalActiveApp
+    }
     presentationID = UUID()
 
     if panel == nil {
@@ -661,30 +770,63 @@ final class QuickInsertController {
   }
 
   private func pasteToPreviousApp(_ text: String) {
-    if let app = previousActiveApp, app != NSRunningApplication.current {
-      app.activate(options: [.activateIgnoringOtherApps])
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
-        self?.pasteViaCommandV(text)
-      }
+    let target = (previousActiveApp ?? lastExternalActiveApp)
+    if let app = target, app != NSRunningApplication.current {
+      app.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
+      pasteWhenTargetIsFrontmost(text: text, targetApp: app, attempt: 0)
       return
     }
 
-    pasteViaCommandV(text)
+    _ = pasteViaCommandV(text)
   }
 
-  private func pasteViaCommandV(_ text: String) {
+  private func pasteWhenTargetIsFrontmost(text: String, targetApp: NSRunningApplication, attempt: Int) {
+    let maxAttempts = 10
+    let isFrontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == targetApp.processIdentifier
+
+    if isFrontmost {
+      if pasteViaCommandV(text) || attempt >= maxAttempts {
+        return
+      }
+    } else if attempt >= maxAttempts {
+      _ = pasteViaCommandV(text)
+      return
+    }
+
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+      self?.pasteWhenTargetIsFrontmost(text: text, targetApp: targetApp, attempt: attempt + 1)
+    }
+  }
+
+  @discardableResult
+  private func pasteViaCommandV(_ text: String) -> Bool {
+    guard AXIsProcessTrusted() else {
+      showAccessibilityPermissionAlert()
+      return false
+    }
+
     let pb = NSPasteboard.general
     pb.clearContents()
     pb.setString(text, forType: .string)
 
-    if triggerPasteViaSystemEvents() {
-      return
+    let systemEvents = triggerPasteViaSystemEvents()
+    if systemEvents.success {
+      return true
     }
 
-    _ = triggerPasteViaCGEvent()
+    if systemEvents.errorNumber == -1743 || systemEvents.errorNumber == -1744 {
+      showAutomationPermissionAlert(details: systemEvents.errorMessage)
+    }
+
+    if triggerPasteViaCGEvent() {
+      return true
+    }
+
+    showPasteFailedAlert(details: systemEvents.errorMessage)
+    return false
   }
 
-  private func triggerPasteViaSystemEvents() -> Bool {
+  private func triggerPasteViaSystemEvents() -> (success: Bool, errorNumber: Int?, errorMessage: String?) {
     let script = """
     tell application "System Events"
       keystroke "v" using command down
@@ -692,7 +834,12 @@ final class QuickInsertController {
     """
     var error: NSDictionary?
     let result = NSAppleScript(source: script)?.executeAndReturnError(&error)
-    return result != nil && error == nil
+    if result != nil && error == nil {
+      return (true, nil, nil)
+    }
+    let number = error?[NSAppleScript.errorNumber] as? Int
+    let message = (error?[NSAppleScript.errorMessage] as? String) ?? "未知错误"
+    return (false, number, message)
   }
 
   private func triggerPasteViaCGEvent() -> Bool {
@@ -706,6 +853,53 @@ final class QuickInsertController {
     keyDown.post(tap: .cghidEventTap)
     keyUp.post(tap: .cghidEventTap)
     return true
+  }
+
+  private func showAccessibilityPermissionAlert() {
+    guard !hasShownAccessibilityAlert else { return }
+    hasShownAccessibilityAlert = true
+    hasShownPasteFailedAlert = false
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "无法自动填入：缺少“辅助功能”权限"
+    alert.informativeText = """
+    请前往：
+    系统设置 -> 隐私与安全性 -> 辅助功能
+    将 mysnippets 勾选为允许。
+    完成后重启 mysnippets 再试。
+    """
+    alert.addButton(withTitle: "知道了")
+    alert.runModal()
+  }
+
+  private func showAutomationPermissionAlert(details: String?) {
+    guard !hasShownAutomationAlert else { return }
+    hasShownAutomationAlert = true
+    let detailText = details?.isEmpty == false ? "\n系统返回：\(details!)" : ""
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "自动化权限被拒绝（System Events）"
+    alert.informativeText = """
+    请前往：
+    系统设置 -> 隐私与安全性 -> 自动化
+    在 mysnippets 下允许控制 System Events。\(detailText)
+    """
+    alert.addButton(withTitle: "知道了")
+    alert.runModal()
+  }
+
+  private func showPasteFailedAlert(details: String?) {
+    guard !hasShownPasteFailedAlert else { return }
+    hasShownPasteFailedAlert = true
+    let detailText = details?.isEmpty == false ? "\n系统返回：\(details!)" : ""
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "自动填入失败"
+    alert.informativeText = """
+    已尝试使用 System Events 和键盘事件模拟粘贴，但都未成功。请检查辅助功能/自动化权限。\(detailText)
+    """
+    alert.addButton(withTitle: "知道了")
+    alert.runModal()
   }
 }
 
@@ -783,7 +977,7 @@ struct QuickInsertView: View {
     VStack(alignment: .leading, spacing: 10) {
       header
 
-      HSplitView {
+      HStack(alignment: .top, spacing: 12) {
         leftPane
         rightPane
       }
@@ -884,7 +1078,7 @@ struct QuickInsertView: View {
         }
       }
     }
-    .frame(minWidth: 450)
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
   }
 
   private var rightPane: some View {
@@ -928,7 +1122,7 @@ struct QuickInsertView: View {
           }
 
           ScrollView {
-            Text(renderPreview(snippet.body))
+            renderPreviewText(snippet.body)
               .font(.system(size: settings.fontSize, design: .monospaced))
               .textSelection(.enabled)
               .frame(maxWidth: .infinity, alignment: .leading)
@@ -942,7 +1136,7 @@ struct QuickInsertView: View {
           .foregroundStyle(.secondary)
       }
     }
-    .frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
   }
 
   private var activeSnippets: [Snippet] {
@@ -977,7 +1171,6 @@ struct QuickInsertView: View {
         s.name,
         s.trigger,
         s.groupPath.joined(separator: "/"),
-        s.keywords.joined(separator: " "),
         s.body,
         stripComments(s.body),
       ].joined(separator: "\n").lowercased()
@@ -1155,6 +1348,7 @@ struct ContentView: View {
   @EnvironmentObject private var settings: UISettings
 
   @State private var search = ""
+  @State private var focusMainSearchField = false
   @State private var selectedGroupSelection: GroupSelection = .all
   @State private var selectedSnippetID: String?
 
@@ -1231,7 +1425,7 @@ struct ContentView: View {
                 }
               }
               Button("在该分组新建片段") {
-                editorTarget = Snippet(id: UUID().uuidString, name: "", trigger: "", groupPath: node.path, keywords: [], body: "")
+                editorTarget = Snippet(id: UUID().uuidString, name: "", trigger: "", groupPath: node.path, body: "")
               }
             }
           }
@@ -1241,9 +1435,17 @@ struct ContentView: View {
     } content: {
       VStack(spacing: 8) {
         HStack(spacing: 8) {
-          TextField("搜索名称、触发词、正文", text: $search)
+          QuickSearchField(
+            placeholder: "搜索名称、触发词、正文",
+            text: $search,
+            shouldFocus: $focusMainSearchField,
+            onMoveUp: { moveSelection(step: -1) },
+            onMoveDown: { moveSelection(step: 1) },
+            onSubmit: {},
+            onEscape: {}
+          )
           Button("新建") {
-            editorTarget = Snippet(id: UUID().uuidString, name: "", trigger: "", groupPath: selectedGroupPath, keywords: [], body: "")
+            editorTarget = Snippet(id: UUID().uuidString, name: "", trigger: "", groupPath: selectedGroupPath, body: "")
           }
         }
         .padding(.horizontal, 10)
@@ -1306,7 +1508,7 @@ struct ContentView: View {
             .foregroundStyle(.secondary)
 
           ScrollView {
-            Text(renderPreview(snippet.body))
+            renderPreviewText(snippet.body)
               .font(.system(size: settings.fontSize, design: .monospaced))
               .textSelection(.enabled)
               .frame(maxWidth: .infinity, alignment: .leading)
@@ -1319,7 +1521,7 @@ struct ContentView: View {
             .foregroundStyle(.secondary)
         }
 
-        Text("分组目录: \(store.storageRootURL.path)")
+        Text("存储文件: \(store.storageFileURL.path)")
           .font(.caption)
           .foregroundStyle(.secondary)
       }
@@ -1346,6 +1548,7 @@ struct ContentView: View {
       }
     }
     .onAppear {
+      focusMainSearchField = true
       if selectedSnippetID == nil {
         selectedSnippetID = filteredSnippets.first?.id
       }
@@ -1380,7 +1583,6 @@ struct ContentView: View {
         s.name,
         s.trigger,
         s.groupPath.joined(separator: "/"),
-        s.keywords.joined(separator: " "),
         s.body,
         stripComments(s.body),
       ].joined(separator: "\n").lowercased()
@@ -1464,30 +1666,55 @@ struct SnippetEditorSheet: View {
   let onSave: (Snippet) -> Void
 
   @State private var groupText: String = ""
-  @State private var keywordText: String = ""
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 10) {
+    VStack(alignment: .leading, spacing: 12) {
       Text(snippet.name.isEmpty ? "新建 Snippet" : "编辑 Snippet")
         .font(.headline)
 
-      TextField("名称", text: $snippet.name)
-      TextField("触发词", text: $snippet.trigger)
-      TextField("分组路径（A/B/C）", text: $groupText)
-      TextField("关键词（逗号分隔）", text: $keywordText)
+      ScrollView {
+        VStack(alignment: .leading, spacing: 10) {
+          VStack(alignment: .leading, spacing: 4) {
+            Text("名称")
+            TextField("例如：Java 空值判断模板", text: $snippet.name)
+            Text("用于列表展示和搜索。")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
 
-      Text("正文")
-      TextEditor(text: $snippet.body)
-        .font(.system(size: settings.fontSize, design: .monospaced))
-        .frame(minHeight: 220)
-        .border(Color.secondary.opacity(0.2))
+          VStack(alignment: .leading, spacing: 4) {
+            Text("触发词（可选）")
+            TextField("例如：;nullcheck", text: $snippet.trigger)
+            Text("用于快速识别该片段，不填也可使用。")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
 
+          VStack(alignment: .leading, spacing: 4) {
+            Text("分组路径")
+            TextField("例如：Backend/Java/Utils", text: $groupText)
+            Text("使用 / 分隔层级；为空会归到“未分组”。")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+
+          Text("正文（多行）")
+          TextEditor(text: $snippet.body)
+            .font(.system(size: settings.fontSize, design: .monospaced))
+            .frame(minHeight: 220)
+            .border(Color.secondary.opacity(0.2))
+          Text("最终复制/粘贴的内容。支持注释块 {{! ... }}（复制时会去掉）。")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      }
+
+      Divider()
       HStack {
         Spacer()
         Button("取消") { dismiss() }
         Button("保存") {
           snippet.groupPath = splitPath(groupText)
-          snippet.keywords = keywordText.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
           onSave(snippet)
           dismiss()
         }
@@ -1495,10 +1722,9 @@ struct SnippetEditorSheet: View {
       }
     }
     .padding(16)
-    .frame(width: 700, height: 520)
+    .frame(width: 700, height: 560)
     .onAppear {
       groupText = snippet.groupPath.joined(separator: "/")
-      keywordText = snippet.keywords.joined(separator: ", ")
     }
   }
 
@@ -1642,17 +1868,42 @@ func stripComments(_ body: String) -> String {
     .trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
-func renderPreview(_ body: String) -> String {
-  let ns = body as NSString
-  guard let regex = try? NSRegularExpression(pattern: #"\{\{!([\s\S]*?)\}\}"#) else { return body }
-  let range = NSRange(location: 0, length: ns.length)
-  var output = body
-  for m in regex.matches(in: body, range: range).reversed() {
-    guard m.numberOfRanges > 1, let cr = Range(m.range(at: 1), in: output), let fr = Range(m.range(at: 0), in: output) else { continue }
-    let note = output[cr].trimmingCharacters(in: .whitespacesAndNewlines)
-    output.replaceSubrange(fr, with: "\n[注释] \(note)\n")
+func renderPreviewText(_ body: String) -> Text {
+  struct Segment {
+    let text: String
+    let isComment: Bool
   }
-  return output
+
+  let ns = body as NSString
+  guard let regex = try? NSRegularExpression(pattern: #"\{\{!([\s\S]*?)\}\}"#) else {
+    return Text(body)
+  }
+
+  let matches = regex.matches(in: body, range: NSRange(location: 0, length: ns.length))
+  if matches.isEmpty { return Text(body) }
+
+  var segments: [Segment] = []
+  var cursor = 0
+  for match in matches {
+    let full = match.range(at: 0)
+    let comment = match.range(at: 1)
+    if full.location > cursor {
+      segments.append(Segment(text: ns.substring(with: NSRange(location: cursor, length: full.location - cursor)), isComment: false))
+    }
+    if comment.location != NSNotFound {
+      let note = ns.substring(with: comment).trimmingCharacters(in: .whitespacesAndNewlines)
+      segments.append(Segment(text: "\n[注释] \(note)\n", isComment: true))
+    }
+    cursor = full.location + full.length
+  }
+  if cursor < ns.length {
+    segments.append(Segment(text: ns.substring(from: cursor), isComment: false))
+  }
+
+  return segments.reduce(Text("")) { partial, segment in
+    let piece = Text(segment.text).foregroundColor(segment.isComment ? .orange : .primary)
+    return partial + piece
+  }
 }
 
 func copyClean(_ body: String) {

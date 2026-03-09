@@ -4,7 +4,7 @@ A native macOS prototype for Alfred-like snippets:
 - Nested group tree
 - Compact list with adjustable row height and font size
 - Preview-only comments (`{{! ... }}`)
-- Markdown-backed storage with auto reload
+- Single-file JSON storage with auto reload
 
 ## Run
 
@@ -15,10 +15,11 @@ swift run mysnippets
 
 ## Storage
 
-Default markdown file:
-- `~/Documents/mysnippets/snippets.md`
+Default file:
+- `~/Documents/mysnippets/snippets.json`
 
-Format per block:
-- `<!-- HIERASNIP:BEGIN {json-meta} -->`
-- `...body...`
-- `<!-- HIERASNIP:END -->`
+Format:
+- Top-level `version`, `groups`, `snippets`
+- Nested groups via `groups[].parent_id`
+- Group hidden state via `groups[].hidden`
+- Snippet body stored as multi-line array `snippets[].body`
