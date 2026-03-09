@@ -769,42 +769,42 @@ final class QuickInsertController {
   }
 
   private func insert(_ snippet: Snippet) {
-    let text = stripComments(snippet.body)
+    let expanded = expandSnippetBody(snippet.body)
     hide()
-    pasteToPreviousApp(text)
+    pasteToPreviousApp(expanded)
   }
 
-  private func pasteToPreviousApp(_ text: String) {
+  private func pasteToPreviousApp(_ content: ExpandedSnippetContent) {
     let target = (previousActiveApp ?? lastExternalActiveApp)
     if let app = target, app != NSRunningApplication.current {
       app.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
-      pasteWhenTargetIsFrontmost(text: text, targetApp: app, attempt: 0)
+      pasteWhenTargetIsFrontmost(content: content, targetApp: app, attempt: 0)
       return
     }
 
-    _ = pasteViaCommandV(text)
+    _ = pasteViaCommandV(content)
   }
 
-  private func pasteWhenTargetIsFrontmost(text: String, targetApp: NSRunningApplication, attempt: Int) {
+  private func pasteWhenTargetIsFrontmost(content: ExpandedSnippetContent, targetApp: NSRunningApplication, attempt: Int) {
     let maxAttempts = 10
     let isFrontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == targetApp.processIdentifier
 
     if isFrontmost {
-      if pasteViaCommandV(text) || attempt >= maxAttempts {
+      if pasteViaCommandV(content) || attempt >= maxAttempts {
         return
       }
     } else if attempt >= maxAttempts {
-      _ = pasteViaCommandV(text)
+      _ = pasteViaCommandV(content)
       return
     }
 
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-      self?.pasteWhenTargetIsFrontmost(text: text, targetApp: targetApp, attempt: attempt + 1)
+      self?.pasteWhenTargetIsFrontmost(content: content, targetApp: targetApp, attempt: attempt + 1)
     }
   }
 
   @discardableResult
-  private func pasteViaCommandV(_ text: String) -> Bool {
+  private func pasteViaCommandV(_ content: ExpandedSnippetContent) -> Bool {
     guard AXIsProcessTrusted() else {
       showAccessibilityPermissionAlert()
       return false
@@ -812,10 +812,11 @@ final class QuickInsertController {
 
     let pb = NSPasteboard.general
     pb.clearContents()
-    pb.setString(text, forType: .string)
+    pb.setString(content.text, forType: .string)
 
     let systemEvents = triggerPasteViaSystemEvents()
     if systemEvents.success {
+      positionCursorIfNeeded(content.cursorOffsetFromEnd)
       return true
     }
 
@@ -824,6 +825,7 @@ final class QuickInsertController {
     }
 
     if triggerPasteViaCGEvent() {
+      positionCursorIfNeeded(content.cursorOffsetFromEnd)
       return true
     }
 
@@ -858,6 +860,24 @@ final class QuickInsertController {
     keyDown.post(tap: .cghidEventTap)
     keyUp.post(tap: .cghidEventTap)
     return true
+  }
+
+  private func positionCursorIfNeeded(_ offset: Int?) {
+    guard let offset, offset > 0 else { return }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+      self.sendLeftArrowKeyPresses(count: offset)
+    }
+  }
+
+  private func sendLeftArrowKeyPresses(count: Int) {
+    guard let source = CGEventSource(stateID: .hidSystemState) else { return }
+    for _ in 0..<count {
+      guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x7B, keyDown: true),
+            let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x7B, keyDown: false)
+      else { return }
+      keyDown.post(tap: .cghidEventTap)
+      keyUp.post(tap: .cghidEventTap)
+    }
   }
 
   private func showAccessibilityPermissionAlert() {
@@ -1525,15 +1545,17 @@ struct ContentView: View {
         .padding(.top, 8)
 
         List(filteredSnippets, selection: $selectedSnippetID) { snippet in
+          let isDisabled = store.isAnyAncestorDisabled(snippet.groupPath)
           HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
               Text(snippet.name)
                 .font(.system(size: settings.fontSize))
                 .lineLimit(1)
+                .foregroundStyle(isDisabled ? .secondary : .primary)
               if !snippet.description.isEmpty {
                 Text(snippet.description)
                   .font(.system(size: max(10, settings.fontSize - 2)))
-                  .foregroundStyle(.secondary)
+                  .foregroundStyle(isDisabled ? .tertiary : .secondary)
                   .lineLimit(1)
               }
             }
@@ -1541,9 +1563,10 @@ struct ContentView: View {
             if !snippet.trigger.isEmpty {
               Text(snippet.trigger)
                 .font(.system(size: max(10, settings.fontSize - 1), weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(isDisabled ? .tertiary : .secondary)
             }
           }
+          .opacity(isDisabled ? 0.62 : 1.0)
           .contextMenu {
             Button("复制") { copyClean(snippet.body) }
             Button("编辑") {
@@ -1582,6 +1605,7 @@ struct ContentView: View {
         }
 
         if let snippet = selectedSnippet {
+          let isDisabled = store.isAnyAncestorDisabled(snippet.groupPath)
           Text(snippet.name)
             .font(.title3.weight(.semibold))
           if !snippet.description.isEmpty {
@@ -1592,6 +1616,11 @@ struct ContentView: View {
           Text(groupLabel(snippet.groupPath))
             .font(.system(size: settings.fontSize))
             .foregroundStyle(.secondary)
+          if isDisabled {
+            Text("该 snippet 所在分组已禁用，仍可在管理页预览和编辑，但不会出现在悬浮窗搜索中。")
+              .font(.caption)
+              .foregroundStyle(.orange)
+          }
 
           ScrollView {
             renderPreviewText(snippet.body)
@@ -1602,6 +1631,49 @@ struct ContentView: View {
           }
           .background(Color(NSColor.textBackgroundColor))
           .cornerRadius(8)
+        } else if case let .group(path) = selectedGroupSelection {
+          let isDisabled = store.isAnyAncestorDisabled(path)
+          let groupSnippets = store.snippets.filter { isPrefixPath(path, of: $0.groupPath) }
+          let directSnippets = store.snippets.filter { $0.groupPath == path }
+          let subgroupCount = store.groups.filter { isPrefixPath(path, of: $0) }.count - 1
+
+          Text(path.last ?? "分组")
+            .font(.title3.weight(.semibold))
+          Text(groupLabel(path))
+            .font(.system(size: settings.fontSize))
+            .foregroundStyle(.secondary)
+          if isDisabled {
+            Text("该分组已禁用，仍可在管理页预览和编辑，但不会出现在悬浮窗搜索中。")
+              .font(.caption)
+              .foregroundStyle(.orange)
+          }
+
+          VStack(alignment: .leading, spacing: 6) {
+            Text("本组 snippet: \(directSnippets.count)")
+            Text("包含子组共 snippet: \(groupSnippets.count)")
+            Text("子分组数量: \(max(0, subgroupCount))")
+          }
+          .font(.system(size: settings.fontSize))
+
+          if let firstSnippet = groupSnippets.first {
+            Divider()
+            Text("示例预览")
+              .font(.headline)
+            ScrollView {
+              renderPreviewText(firstSnippet.body)
+                .font(.system(size: settings.fontSize, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+            }
+            .background(Color(NSColor.textBackgroundColor))
+            .cornerRadius(8)
+          } else {
+            Spacer()
+            Text("该分组下暂无 snippet")
+              .foregroundStyle(.secondary)
+            Spacer()
+          }
         } else {
           Text("未选择 snippet")
             .foregroundStyle(.secondary)
@@ -1663,7 +1735,6 @@ struct ContentView: View {
     let q = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     return store.snippets.filter { s in
       if !selectedGroupPath.isEmpty && !isPrefixPath(selectedGroupPath, of: s.groupPath) { return false }
-      if store.isAnyAncestorDisabled(s.groupPath) { return false }
       if q.isEmpty { return true }
       let text = [
         s.name,
@@ -1679,8 +1750,7 @@ struct ContentView: View {
   }
 
   private var groupTree: [GroupNode] {
-    let active = store.snippets.filter { !store.isAnyAncestorDisabled($0.groupPath) }
-    return buildGroupTree(groups: store.groups, snippets: active)
+    return buildGroupTree(groups: store.groups, snippets: store.snippets)
   }
 
   private func buildGroupTree(groups: [[String]], snippets: [Snippet]) -> [GroupNode] {
@@ -1798,7 +1868,7 @@ struct SnippetEditorSheet: View {
             .font(.system(size: settings.fontSize, design: .monospaced))
             .frame(minHeight: 220)
             .border(Color.secondary.opacity(0.2))
-          Text("最终复制/粘贴的内容。支持注释块 {{! ... }}（复制时会去掉）。")
+          Text("最终复制/粘贴的内容。支持注释块 {{! ... }}，以及 {cursor}、{clipboard}、{date}、{time}、{datetime}、{uuid}。")
             .font(.caption)
             .foregroundStyle(.secondary)
         }
@@ -1957,10 +2027,72 @@ func groupLabel(_ path: [String]) -> String {
   path.isEmpty ? "(No Group)" : path.joined(separator: " / ")
 }
 
+struct ExpandedSnippetContent {
+  let text: String
+  let cursorOffsetFromEnd: Int?
+}
+
 func stripComments(_ body: String) -> String {
   body.replacingOccurrences(of: #"\{\{!([\s\S]*?)\}\}"#, with: "", options: .regularExpression)
     .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
     .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func expandSnippetBody(_ body: String, now: Date = Date()) -> ExpandedSnippetContent {
+  let cleaned = stripComments(body)
+  let pasteboard = NSPasteboard.general
+  let clipboard = pasteboard.string(forType: .string) ?? ""
+
+  let dateFormatter = DateFormatter()
+  dateFormatter.locale = .autoupdatingCurrent
+  dateFormatter.timeZone = .autoupdatingCurrent
+
+  let replacements: [String: () -> String] = [
+    "clipboard": { clipboard },
+    "date": {
+      dateFormatter.dateStyle = .medium
+      dateFormatter.timeStyle = .none
+      return dateFormatter.string(from: now)
+    },
+    "time": {
+      dateFormatter.dateStyle = .none
+      dateFormatter.timeStyle = .short
+      return dateFormatter.string(from: now)
+    },
+    "datetime": {
+      dateFormatter.dateStyle = .medium
+      dateFormatter.timeStyle = .short
+      return dateFormatter.string(from: now)
+    },
+    "uuid": { UUID().uuidString.lowercased() },
+  ]
+
+  var output = ""
+  var cursorIndex: String.Index?
+  var index = cleaned.startIndex
+
+  while index < cleaned.endIndex {
+    if cleaned[index] == "{", let closing = cleaned[index...].firstIndex(of: "}") {
+      let tokenStart = cleaned.index(after: index)
+      let name = String(cleaned[tokenStart..<closing]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      if name == "cursor" {
+        cursorIndex = output.endIndex
+        index = cleaned.index(after: closing)
+        continue
+      }
+      if let replacement = replacements[name] {
+        output.append(replacement())
+        index = cleaned.index(after: closing)
+        continue
+      }
+    }
+
+    output.append(cleaned[index])
+    index = cleaned.index(after: index)
+  }
+
+  let offset = cursorIndex.map { output.distance(from: $0, to: output.endIndex) }
+  return ExpandedSnippetContent(text: output, cursorOffsetFromEnd: offset)
 }
 
 func renderPreviewText(_ body: String) -> Text {
@@ -2004,5 +2136,5 @@ func renderPreviewText(_ body: String) -> Text {
 func copyClean(_ body: String) {
   let pb = NSPasteboard.general
   pb.clearContents()
-  pb.setString(stripComments(body), forType: .string)
+  pb.setString(expandSnippetBody(body).text, forType: .string)
 }
