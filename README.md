@@ -3,6 +3,7 @@
 A native macOS prototype for Alfred-like snippets:
 - Nested group tree
 - Compact list with adjustable row height and font size
+- Optional snippet descriptions for list/search/export
 - Preview-only comments (`{{! ... }}`)
 - Single-file JSON storage with auto reload
 
@@ -23,3 +24,4 @@ Format:
 - Nested groups via `groups[].parent_id`
 - Group hidden state via `groups[].hidden`
 - Snippet body stored as multi-line array `snippets[].body`
+- Optional snippet summary via `snippets[].description`

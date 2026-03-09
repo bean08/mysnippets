@@ -7,6 +7,7 @@ import SwiftUI
 struct Snippet: Identifiable, Codable, Hashable {
   var id: String
   var name: String
+  var description: String
   var trigger: String
   var groupPath: [String]
   var body: String
@@ -218,6 +219,7 @@ final class SnippetStore: ObservableObject {
       Snippet(
         id: "eng-git-commit-template",
         name: "Conventional Commit (CN)",
+        description: "带背景、影响范围和回滚方案占位的提交说明模板。",
         trigger: ";gcc",
         groupPath: ["Engineering", "Git", "Commit", "Templates"],
         body: "feat(scope): 简要说明\\n\\n{{! 发布前删除占位信息，复制时会自动删除此注释。}}\\n背景：...\\n影响范围：...\\n回滚方案：..."
@@ -225,6 +227,7 @@ final class SnippetStore: ObservableObject {
       Snippet(
         id: "work-sync-daily",
         name: "Daily Sync Update",
+        description: "日常站会同步模板，包含昨天、今天和阻塞项。",
         trigger: ";dsu",
         groupPath: ["Work", "Sync", "Daily", "Standup"],
         body: "Yesterday:\\n- ...\\n\\nToday:\\n- ...\\n\\nBlockers:\\n- ...\\n{{! 预览提醒：别忘记 KPI。}}"
@@ -274,6 +277,7 @@ final class SnippetStore: ObservableObject {
       return Snippet(
         id: meta.id,
         name: meta.name,
+        description: "",
         trigger: meta.trigger ?? "",
         groupPath: normalizeGroupPath(meta.groupPath ?? defaultGroupPath),
         body: String(raw[bodyRange])
@@ -456,7 +460,7 @@ final class SnippetStore: ObservableObject {
         name: snippet.name,
         prefix: snippet.trigger,
         body: snippet.body.components(separatedBy: "\n"),
-        description: nil,
+        description: snippet.description.isEmpty ? nil : snippet.description,
         groupID: groupID,
         order: order
       ))
@@ -512,6 +516,7 @@ final class SnippetStore: ObservableObject {
       loadedSnippets.append(Snippet(
         id: snippet.id,
         name: snippet.name,
+        description: snippet.description ?? "",
         trigger: snippet.prefix,
         groupPath: path,
         body: snippet.body.joined(separator: "\n")
@@ -908,9 +913,63 @@ final class QuickSearchPanel: NSPanel {
   override var canBecomeMain: Bool { false }
 }
 
+enum AppIconFactory {
+  static func makeIcon(size: CGFloat = 512) -> NSImage {
+    let image = NSImage(size: NSSize(width: size, height: size))
+    image.lockFocus()
+
+    let bounds = NSRect(x: 0, y: 0, width: size, height: size)
+    let basePath = NSBezierPath(roundedRect: bounds, xRadius: size * 0.22, yRadius: size * 0.22)
+    let baseGradient = NSGradient(colors: [
+      NSColor(calibratedRed: 0.94, green: 0.55, blue: 0.27, alpha: 1),
+      NSColor(calibratedRed: 0.86, green: 0.24, blue: 0.20, alpha: 1),
+    ])!
+    baseGradient.draw(in: basePath, angle: -90)
+
+    let paperRect = NSRect(x: size * 0.19, y: size * 0.14, width: size * 0.62, height: size * 0.72)
+    let paperPath = NSBezierPath(roundedRect: paperRect, xRadius: size * 0.08, yRadius: size * 0.08)
+    NSColor(calibratedWhite: 0.99, alpha: 1).setFill()
+    paperPath.fill()
+
+    let fold = NSBezierPath()
+    fold.move(to: NSPoint(x: paperRect.maxX - size * 0.15, y: paperRect.maxY))
+    fold.line(to: NSPoint(x: paperRect.maxX, y: paperRect.maxY - size * 0.15))
+    fold.line(to: NSPoint(x: paperRect.maxX, y: paperRect.maxY))
+    fold.close()
+    NSColor(calibratedWhite: 0.93, alpha: 1).setFill()
+    fold.fill()
+
+    let lineColor = NSColor(calibratedRed: 0.82, green: 0.32, blue: 0.22, alpha: 1)
+    for index in 0..<4 {
+      let y = size * (0.66 - CGFloat(index) * 0.11)
+      let line = NSBezierPath(roundedRect: NSRect(x: size * 0.29, y: y, width: size * 0.33, height: size * 0.034), xRadius: size * 0.017, yRadius: size * 0.017)
+      lineColor.setFill()
+      line.fill()
+    }
+
+    let spark = NSBezierPath()
+    spark.move(to: NSPoint(x: size * 0.69, y: size * 0.42))
+    spark.line(to: NSPoint(x: size * 0.74, y: size * 0.52))
+    spark.line(to: NSPoint(x: size * 0.84, y: size * 0.57))
+    spark.line(to: NSPoint(x: size * 0.74, y: size * 0.62))
+    spark.line(to: NSPoint(x: size * 0.69, y: size * 0.72))
+    spark.line(to: NSPoint(x: size * 0.64, y: size * 0.62))
+    spark.line(to: NSPoint(x: size * 0.54, y: size * 0.57))
+    spark.line(to: NSPoint(x: size * 0.64, y: size * 0.52))
+    spark.close()
+    NSColor(calibratedRed: 1.0, green: 0.86, blue: 0.33, alpha: 1).setFill()
+    spark.fill()
+
+    image.unlockFocus()
+    image.isTemplate = false
+    return image
+  }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)
+    NSApp.applicationIconImage = AppIconFactory.makeIcon()
     NSApp.activate(ignoringOtherApps: true)
   }
 }
@@ -1053,8 +1112,16 @@ struct QuickInsertView: View {
             HStack(spacing: 8) {
               Image(systemName: "text.alignleft")
                 .foregroundStyle(.secondary)
-              Text(snippet.name)
-                .font(.system(size: settings.fontSize))
+              VStack(alignment: .leading, spacing: 2) {
+                Text(snippet.name)
+                  .font(.system(size: settings.fontSize))
+                if !snippet.description.isEmpty {
+                  Text(snippet.description)
+                    .font(.system(size: max(10, settings.fontSize - 2)))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                }
+              }
               Spacer(minLength: 4)
               if !snippet.trigger.isEmpty {
                 Text(snippet.trigger)
@@ -1112,6 +1179,11 @@ struct QuickInsertView: View {
         case .snippet(let snippet):
           Text(snippet.name)
             .font(.title3.weight(.semibold))
+          if !snippet.description.isEmpty {
+            Text(snippet.description)
+              .font(.system(size: settings.fontSize))
+              .foregroundStyle(.secondary)
+          }
           Text(snippet.groupPath.joined(separator: " / "))
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -1169,6 +1241,7 @@ struct QuickInsertView: View {
       if q.isEmpty { return s.groupPath == currentGroupPath }
       let text = [
         s.name,
+        s.description,
         s.trigger,
         s.groupPath.joined(separator: "/"),
         s.body,
@@ -1425,7 +1498,7 @@ struct ContentView: View {
                 }
               }
               Button("在该分组新建片段") {
-                editorTarget = Snippet(id: UUID().uuidString, name: "", trigger: "", groupPath: node.path, body: "")
+                editorTarget = Snippet(id: UUID().uuidString, name: "", description: "", trigger: "", groupPath: node.path, body: "")
               }
             }
           }
@@ -1445,7 +1518,7 @@ struct ContentView: View {
             onEscape: {}
           )
           Button("新建") {
-            editorTarget = Snippet(id: UUID().uuidString, name: "", trigger: "", groupPath: selectedGroupPath, body: "")
+            editorTarget = Snippet(id: UUID().uuidString, name: "", description: "", trigger: "", groupPath: selectedGroupPath, body: "")
           }
         }
         .padding(.horizontal, 10)
@@ -1453,9 +1526,17 @@ struct ContentView: View {
 
         List(filteredSnippets, selection: $selectedSnippetID) { snippet in
           HStack(spacing: 8) {
-            Text(snippet.name)
-              .font(.system(size: settings.fontSize))
-              .lineLimit(1)
+            VStack(alignment: .leading, spacing: 2) {
+              Text(snippet.name)
+                .font(.system(size: settings.fontSize))
+                .lineLimit(1)
+              if !snippet.description.isEmpty {
+                Text(snippet.description)
+                  .font(.system(size: max(10, settings.fontSize - 2)))
+                  .foregroundStyle(.secondary)
+                  .lineLimit(1)
+              }
+            }
             Spacer(minLength: 4)
             if !snippet.trigger.isEmpty {
               Text(snippet.trigger)
@@ -1503,6 +1584,11 @@ struct ContentView: View {
         if let snippet = selectedSnippet {
           Text(snippet.name)
             .font(.title3.weight(.semibold))
+          if !snippet.description.isEmpty {
+            Text(snippet.description)
+              .font(.system(size: settings.fontSize))
+              .foregroundStyle(.secondary)
+          }
           Text(groupLabel(snippet.groupPath))
             .font(.system(size: settings.fontSize))
             .foregroundStyle(.secondary)
@@ -1581,6 +1667,7 @@ struct ContentView: View {
       if q.isEmpty { return true }
       let text = [
         s.name,
+        s.description,
         s.trigger,
         s.groupPath.joined(separator: "/"),
         s.body,
@@ -1686,6 +1773,14 @@ struct SnippetEditorSheet: View {
             Text("触发词（可选）")
             TextField("例如：;nullcheck", text: $snippet.trigger)
             Text("用于快速识别该片段，不填也可使用。")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+
+          VStack(alignment: .leading, spacing: 4) {
+            Text("描述（可选）")
+            TextField("例如：给 Java 空值判断快速起手", text: $snippet.description)
+            Text("用于列表补充说明、搜索和后续导出。")
               .font(.caption)
               .foregroundStyle(.secondary)
           }
