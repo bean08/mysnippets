@@ -779,6 +779,9 @@ final class QuickInsertController {
       panel.isReleasedWhenClosed = false
       panel.hidesOnDeactivate = false
       panel.collectionBehavior = [.moveToActiveSpace]
+      panel.onResignKey = { [weak self] in
+        self?.hide()
+      }
       self.panel = panel
     }
 
@@ -986,8 +989,15 @@ final class QuickInsertController {
 }
 
 final class QuickSearchPanel: NSPanel {
+  var onResignKey: (() -> Void)?
+
   override var canBecomeKey: Bool { true }
   override var canBecomeMain: Bool { false }
+
+  override func resignKey() {
+    super.resignKey()
+    onResignKey?()
+  }
 }
 
 struct WindowAccessor: NSViewRepresentable {
