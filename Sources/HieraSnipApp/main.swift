@@ -776,7 +776,6 @@ final class QuickInsertController {
       )
       panel.title = "快速搜索 Snippet"
       panel.level = .floating
-      panel.center()
       panel.isReleasedWhenClosed = false
       panel.hidesOnDeactivate = false
       panel.collectionBehavior = [.moveToActiveSpace]
@@ -806,6 +805,10 @@ final class QuickInsertController {
       panel?.contentViewController = host
     }
 
+    if let panel {
+      let frame = WindowLayout.quickPanelFrame(for: panel.frame.size, screen: panel.screen ?? NSScreen.main)
+      panel.setFrame(frame, display: false)
+    }
     panel?.makeKeyAndOrderFront(nil)
     panel?.orderFrontRegardless()
   }
@@ -1001,6 +1004,37 @@ final class QuickSearchPanel: NSPanel {
   }
 }
 
+enum WindowLayout {
+  static let mainWindowWidthRatio: CGFloat = 0.744
+  static let mainWindowHeightRatio: CGFloat = 0.82
+  static let quickPanelTopInsetRatio: CGFloat = 0.16
+
+  static func defaultMainWindowSize(for screen: NSScreen? = NSScreen.main) -> NSSize {
+    let visibleFrame = (screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+    return NSSize(
+      width: floor(visibleFrame.width * mainWindowWidthRatio),
+      height: floor(visibleFrame.height * mainWindowHeightRatio)
+    )
+  }
+
+  static func centeredFrame(for size: NSSize, screen: NSScreen? = NSScreen.main) -> NSRect {
+    let visibleFrame = (screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+    return NSRect(
+      x: visibleFrame.midX - (size.width / 2),
+      y: visibleFrame.midY - (size.height / 2),
+      width: size.width,
+      height: size.height
+    )
+  }
+
+  static func quickPanelFrame(for size: NSSize, screen: NSScreen? = NSScreen.main) -> NSRect {
+    let visibleFrame = (screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+    let x = visibleFrame.midX - (size.width / 2)
+    let y = visibleFrame.maxY - size.height - floor(visibleFrame.height * quickPanelTopInsetRatio)
+    return NSRect(x: x, y: y, width: size.width, height: size.height)
+  }
+}
+
 struct WindowAccessor: NSViewRepresentable {
   let onResolve: (NSWindow) -> Void
 
@@ -1168,13 +1202,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   }
 
   private func applyAdaptiveInitialSize(to window: NSWindow) {
-    guard let screen = window.screen ?? NSScreen.main else { return }
-    let visibleFrame = screen.visibleFrame
-    let targetWidth = min(1165, max(900, floor(visibleFrame.width * 0.59)))
-    let targetHeight = min(760, max(700, floor(visibleFrame.height * 0.80)))
-    let size = NSSize(width: targetWidth, height: targetHeight)
-    window.setContentSize(size)
-    window.center()
+    let size = WindowLayout.defaultMainWindowSize(for: window.screen)
+    let frame = WindowLayout.centeredFrame(for: size, screen: window.screen)
+    window.setFrame(frame, display: true)
   }
 }
 
@@ -1183,6 +1213,7 @@ struct mysnippetsApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
   @StateObject private var store = SnippetStore(storageFilePath: SnippetStore.defaultStorageFilePath())
   @StateObject private var settings = UISettings()
+  private let initialWindowSize = WindowLayout.defaultMainWindowSize()
 
   var body: some Scene {
     WindowGroup("mysnippets") {
@@ -1207,7 +1238,7 @@ struct mysnippetsApp: App {
         }
     }
     .windowResizability(.contentSize)
-    .defaultSize(width: 950, height: 740)
+    .defaultSize(width: initialWindowSize.width, height: initialWindowSize.height)
 
     Settings {
       SettingsView()
