@@ -635,6 +635,96 @@ final class UISettings: ObservableObject {
   @AppStorage("fontSize") var fontSize: Double = 13
   @AppStorage("rowHeight") var rowHeight: Double = 22
   @AppStorage("storageFilePath") var storageFilePath: String = SnippetStore.defaultStorageFilePath()
+  @AppStorage("hotKeyKeyCode") var hotKeyKeyCode: Int = Int(kVK_ANSI_0)
+  @AppStorage("hotKeyModifiers") var hotKeyModifiers: Int = Int(optionKey)
+
+  var hotKeyShortcut: HotKeyShortcut {
+    get {
+      HotKeyShortcut(
+        keyCode: UInt32(hotKeyKeyCode),
+        carbonModifiers: UInt32(hotKeyModifiers)
+      )
+    }
+    set {
+      hotKeyKeyCode = Int(newValue.keyCode)
+      hotKeyModifiers = Int(newValue.carbonModifiers)
+    }
+  }
+}
+
+struct HotKeyShortcut: Equatable {
+  let keyCode: UInt32
+  let carbonModifiers: UInt32
+
+  static let `default` = HotKeyShortcut(
+    keyCode: UInt32(kVK_ANSI_0),
+    carbonModifiers: UInt32(optionKey)
+  )
+
+  var displayString: String {
+    modifierSymbols + (keyDisplay ?? "?")
+  }
+
+  var hasModifier: Bool {
+    carbonModifiers & UInt32(cmdKey | optionKey | controlKey | shiftKey) != 0
+  }
+
+  var isRecordable: Bool {
+    hasModifier && keyDisplay != nil
+  }
+
+  private var modifierSymbols: String {
+    var parts: [String] = []
+    if carbonModifiers & UInt32(controlKey) != 0 { parts.append("^") }
+    if carbonModifiers & UInt32(optionKey) != 0 { parts.append("⌥") }
+    if carbonModifiers & UInt32(shiftKey) != 0 { parts.append("⇧") }
+    if carbonModifiers & UInt32(cmdKey) != 0 { parts.append("⌘") }
+    return parts.joined()
+  }
+
+  private var keyDisplay: String? {
+    Self.displayString(forKeyCode: keyCode)
+  }
+
+  static func from(event: NSEvent) -> HotKeyShortcut? {
+    let relevantFlags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+    let shortcut = HotKeyShortcut(
+      keyCode: UInt32(event.keyCode),
+      carbonModifiers: carbonModifiers(from: relevantFlags)
+    )
+    return shortcut.isRecordable ? shortcut : nil
+  }
+
+  static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
+    var result: UInt32 = 0
+    if flags.contains(.command) { result |= UInt32(cmdKey) }
+    if flags.contains(.option) { result |= UInt32(optionKey) }
+    if flags.contains(.control) { result |= UInt32(controlKey) }
+    if flags.contains(.shift) { result |= UInt32(shiftKey) }
+    return result
+  }
+
+  static func displayString(forKeyCode keyCode: UInt32) -> String? {
+    let keys: [UInt32: String] = [
+      UInt32(kVK_ANSI_A): "A", UInt32(kVK_ANSI_B): "B", UInt32(kVK_ANSI_C): "C", UInt32(kVK_ANSI_D): "D",
+      UInt32(kVK_ANSI_E): "E", UInt32(kVK_ANSI_F): "F", UInt32(kVK_ANSI_G): "G", UInt32(kVK_ANSI_H): "H",
+      UInt32(kVK_ANSI_I): "I", UInt32(kVK_ANSI_J): "J", UInt32(kVK_ANSI_K): "K", UInt32(kVK_ANSI_L): "L",
+      UInt32(kVK_ANSI_M): "M", UInt32(kVK_ANSI_N): "N", UInt32(kVK_ANSI_O): "O", UInt32(kVK_ANSI_P): "P",
+      UInt32(kVK_ANSI_Q): "Q", UInt32(kVK_ANSI_R): "R", UInt32(kVK_ANSI_S): "S", UInt32(kVK_ANSI_T): "T",
+      UInt32(kVK_ANSI_U): "U", UInt32(kVK_ANSI_V): "V", UInt32(kVK_ANSI_W): "W", UInt32(kVK_ANSI_X): "X",
+      UInt32(kVK_ANSI_Y): "Y", UInt32(kVK_ANSI_Z): "Z",
+      UInt32(kVK_ANSI_0): "0", UInt32(kVK_ANSI_1): "1", UInt32(kVK_ANSI_2): "2", UInt32(kVK_ANSI_3): "3",
+      UInt32(kVK_ANSI_4): "4", UInt32(kVK_ANSI_5): "5", UInt32(kVK_ANSI_6): "6", UInt32(kVK_ANSI_7): "7",
+      UInt32(kVK_ANSI_8): "8", UInt32(kVK_ANSI_9): "9",
+      UInt32(kVK_Space): "Space", UInt32(kVK_Return): "Return", UInt32(kVK_Tab): "Tab", UInt32(kVK_Delete): "Delete",
+      UInt32(kVK_Escape): "Esc",
+      UInt32(kVK_F1): "F1", UInt32(kVK_F2): "F2", UInt32(kVK_F3): "F3", UInt32(kVK_F4): "F4",
+      UInt32(kVK_F5): "F5", UInt32(kVK_F6): "F6", UInt32(kVK_F7): "F7", UInt32(kVK_F8): "F8",
+      UInt32(kVK_F9): "F9", UInt32(kVK_F10): "F10", UInt32(kVK_F11): "F11", UInt32(kVK_F12): "F12",
+      UInt32(kVK_LeftArrow): "Left", UInt32(kVK_RightArrow): "Right", UInt32(kVK_UpArrow): "Up", UInt32(kVK_DownArrow): "Down"
+    ]
+    return keys[keyCode]
+  }
 }
 
 final class GlobalHotKeyManager {
@@ -648,6 +738,7 @@ final class GlobalHotKeyManager {
   private var hotKeyRef: EventHotKeyRef?
   private var handlerRef: EventHandlerRef?
   private var isRegistered = false
+  private var currentShortcut: HotKeyShortcut = .default
 
   private init() {}
 
@@ -658,6 +749,12 @@ final class GlobalHotKeyManager {
     if let handlerRef {
       RemoveEventHandler(handlerRef)
     }
+  }
+
+  func configure(shortcut: HotKeyShortcut, onPressed: @escaping () -> Void) {
+    self.onPressed = onPressed
+    registerIfNeeded()
+    updateRegisteredShortcut(shortcut)
   }
 
   func registerIfNeeded() {
@@ -679,17 +776,31 @@ final class GlobalHotKeyManager {
       &handlerRef
     )
 
+    isRegistered = true
+  }
+
+  private func updateRegisteredShortcut(_ shortcut: HotKeyShortcut) {
+    guard shortcut.isRecordable else { return }
+    if currentShortcut == shortcut, hotKeyRef != nil { return }
+
+    if let hotKeyRef {
+      UnregisterEventHotKey(hotKeyRef)
+      self.hotKeyRef = nil
+    }
+
     let hotKeyID = EventHotKeyID(signature: Self.hotKeySignature, id: Self.hotKeyID)
-    RegisterEventHotKey(
-      UInt32(kVK_ANSI_0),
-      UInt32(optionKey),
+    let status = RegisterEventHotKey(
+      shortcut.keyCode,
+      shortcut.carbonModifiers,
       hotKeyID,
       GetEventDispatcherTarget(),
       0,
       &hotKeyRef
     )
 
-    isRegistered = true
+    if status == noErr {
+      currentShortcut = shortcut
+    }
   }
 
   private func handle(event: EventRef?) -> OSStatus {
@@ -1227,14 +1338,23 @@ struct mysnippetsApp: App {
         )
         .onAppear {
           QuickInsertController.shared.configure(store: store, settings: settings)
-          GlobalHotKeyManager.shared.registerIfNeeded()
-          GlobalHotKeyManager.shared.onPressed = {
+          GlobalHotKeyManager.shared.configure(shortcut: settings.hotKeyShortcut) {
             QuickInsertController.shared.show()
           }
         }
         .onChange(of: settings.storageFilePath) { path in
           store.updateStorageFilePath(path)
           QuickInsertController.shared.configure(store: store, settings: settings)
+        }
+        .onChange(of: settings.hotKeyKeyCode) { _ in
+          GlobalHotKeyManager.shared.configure(shortcut: settings.hotKeyShortcut) {
+            QuickInsertController.shared.show()
+          }
+        }
+        .onChange(of: settings.hotKeyModifiers) { _ in
+          GlobalHotKeyManager.shared.configure(shortcut: settings.hotKeyShortcut) {
+            QuickInsertController.shared.show()
+          }
         }
     }
     .windowResizability(.contentSize)
@@ -1306,7 +1426,7 @@ struct QuickInsertView: View {
       Text("快速搜索并填充")
         .font(.headline)
       Spacer()
-      Text("快捷键: Option + 0")
+      Text("快捷键: \(settings.hotKeyShortcut.displayString)")
         .font(.caption)
         .foregroundStyle(.secondary)
     }
@@ -2228,6 +2348,9 @@ struct SettingsView: View {
   @EnvironmentObject private var store: SnippetStore
   @EnvironmentObject private var settings: UISettings
   @State private var storagePathDraft: String = ""
+  @State private var isRecordingHotKey = false
+  private let fontSizeOptions: [Double] = [11, 12, 13, 14, 15, 16, 18]
+  private let rowHeightOptions: [Double] = [18, 20, 22, 24, 26, 28, 30]
 
   var body: some View {
     VStack(alignment: .leading, spacing: 14) {
@@ -2237,25 +2360,50 @@ struct SettingsView: View {
       HStack(spacing: 12) {
         Text("字号")
           .frame(width: 52, alignment: .leading)
-        Slider(value: $settings.fontSize, in: 11...18, step: 1)
-        Text("\(Int(settings.fontSize))")
-          .frame(width: 28, alignment: .trailing)
+        Picker("字号", selection: $settings.fontSize) {
+          ForEach(fontSizeOptions, id: \.self) { size in
+            Text("\(Int(size))").tag(size)
+          }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .frame(width: 96, alignment: .leading)
       }
 
       HStack(spacing: 12) {
         Text("行高")
           .frame(width: 52, alignment: .leading)
-        Slider(value: $settings.rowHeight, in: 18...30, step: 1)
-        Text("\(Int(settings.rowHeight))")
-          .frame(width: 28, alignment: .trailing)
+        Picker("行高", selection: $settings.rowHeight) {
+          ForEach(rowHeightOptions, id: \.self) { size in
+            Text("\(Int(size))").tag(size)
+          }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .frame(width: 96, alignment: .leading)
       }
 
       HStack(spacing: 12) {
         Text("唤醒键")
           .frame(width: 52, alignment: .leading)
-        Text("Option + 0（当前固定）")
-          .foregroundStyle(.secondary)
+        ShortcutRecorderField(shortcut: Binding(
+          get: { settings.hotKeyShortcut },
+          set: { settings.hotKeyShortcut = $0 }
+        ), isRecording: $isRecordingHotKey)
+        .frame(width: 76, height: 28)
+        Button(isRecordingHotKey ? "取消录制" : "录制") {
+          isRecordingHotKey.toggle()
+        }
+        .controlSize(.small)
+        Button("恢复默认") {
+          settings.hotKeyShortcut = .default
+          isRecordingHotKey = false
+        }
+        .buttonStyle(.borderless)
       }
+      Text("点击“录制”后，直接按下新的快捷键组合即可保存。至少需要一个修饰键。")
+        .font(.caption)
+        .foregroundStyle(.secondary)
 
       VStack(alignment: .leading, spacing: 6) {
         Text("存储文件")
@@ -2281,7 +2429,7 @@ struct SettingsView: View {
       }
     }
     .padding(16)
-    .frame(width: 560, height: 280)
+    .frame(width: 520, height: 320)
     .onAppear {
       storagePathDraft = settings.storageFilePath
     }
@@ -2292,6 +2440,109 @@ struct SettingsView: View {
     let next = trimmed.isEmpty ? SnippetStore.defaultStorageFilePath() : trimmed
     storagePathDraft = next
     settings.storageFilePath = next
+  }
+}
+
+struct ShortcutRecorderField: NSViewRepresentable {
+  @Binding var shortcut: HotKeyShortcut
+  @Binding var isRecording: Bool
+
+  func makeCoordinator() -> Coordinator {
+    Coordinator(self)
+  }
+
+  func makeNSView(context: Context) -> ShortcutRecorderNSView {
+    let view = ShortcutRecorderNSView()
+    view.onShortcutRecorded = { recorded in
+      shortcut = recorded
+      isRecording = false
+    }
+    view.onRecordingCancelled = {
+      isRecording = false
+    }
+    return view
+  }
+
+  func updateNSView(_ nsView: ShortcutRecorderNSView, context: Context) {
+    nsView.displayString = isRecording ? "按下新的快捷键..." : shortcut.displayString
+    nsView.isRecording = isRecording
+    if isRecording, let window = nsView.window, window.firstResponder !== nsView {
+      window.makeFirstResponder(nsView)
+    }
+  }
+
+  final class Coordinator: NSObject {
+    let parent: ShortcutRecorderField
+
+    init(_ parent: ShortcutRecorderField) {
+      self.parent = parent
+    }
+  }
+}
+
+final class ShortcutRecorderNSView: NSView {
+  var onShortcutRecorded: ((HotKeyShortcut) -> Void)?
+  var onRecordingCancelled: (() -> Void)?
+  var isRecording = false {
+    didSet { needsDisplay = true }
+  }
+  var displayString = "" {
+    didSet { needsDisplay = true }
+  }
+
+  override var acceptsFirstResponder: Bool { true }
+
+  override func mouseDown(with event: NSEvent) {
+    window?.makeFirstResponder(self)
+  }
+
+  override func keyDown(with event: NSEvent) {
+    guard isRecording else {
+      super.keyDown(with: event)
+      return
+    }
+
+    if event.keyCode == UInt16(kVK_Escape) {
+      onRecordingCancelled?()
+      return
+    }
+
+    if let shortcut = HotKeyShortcut.from(event: event) {
+      onShortcutRecorded?(shortcut)
+    }
+  }
+
+  override func draw(_ dirtyRect: NSRect) {
+    let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+    let background = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
+    (isRecording ? NSColor.controlAccentColor.withAlphaComponent(0.08) : NSColor.controlBackgroundColor).setFill()
+    background.fill()
+
+    let strokeColor = isRecording ? NSColor.controlAccentColor : NSColor.separatorColor
+    strokeColor.setStroke()
+    background.lineWidth = 1
+    background.stroke()
+
+    let paragraph = NSMutableParagraphStyle()
+    paragraph.alignment = .center
+    let attrs: [NSAttributedString.Key: Any] = [
+      .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .semibold),
+      .foregroundColor: NSColor.labelColor,
+      .paragraphStyle: paragraph,
+    ]
+    let textRect = rect.insetBy(dx: 8, dy: 6)
+    NSAttributedString(string: displayString, attributes: attrs).draw(in: textRect)
+  }
+
+  override func resignFirstResponder() -> Bool {
+    if isRecording {
+      onRecordingCancelled?()
+    }
+    return true
+  }
+
+  override var intrinsicContentSize: NSSize {
+    NSSize(width: 76, height: 28)
   }
 }
 
