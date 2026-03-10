@@ -11,6 +11,7 @@ struct Snippet: Identifiable, Codable, Hashable {
   var trigger: String
   var groupPath: [String]
   var body: String
+  var isFavorite: Bool
 }
 
 struct GroupNode: Identifiable, Hashable {
@@ -105,7 +106,7 @@ final class SnippetStore: ObservableObject {
     }
 
     let loaded = decodeDiskStore(disk)
-    snippets = loaded.snippets.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    snippets = loaded.snippets.sorted(by: compareSnippets)
     groups = loaded.groups.sorted(by: comparePath)
     disabledGroupKeys = loaded.disabledKeys
     groupIDByPathKey = loaded.groupIDByPathKey
@@ -127,6 +128,14 @@ final class SnippetStore: ObservableObject {
 
   func remove(_ snippet: Snippet) {
     let next = snippets.filter { $0.id != snippet.id }
+    persist(snippets: next, groups: groups, disabledKeys: disabledGroupKeys)
+    reload()
+  }
+
+  func toggleFavorite(for snippet: Snippet) {
+    guard let idx = snippets.firstIndex(where: { $0.id == snippet.id }) else { return }
+    var next = snippets
+    next[idx].isFavorite.toggle()
     persist(snippets: next, groups: groups, disabledKeys: disabledGroupKeys)
     reload()
   }
@@ -242,7 +251,8 @@ final class SnippetStore: ObservableObject {
         description: "带背景、影响范围和回滚方案占位的提交说明模板。",
         trigger: ";gcc",
         groupPath: ["Engineering", "Git", "Commit", "Templates"],
-        body: "feat(scope): 简要说明\\n\\n{{! 发布前删除占位信息，复制时会自动删除此注释。}}\\n背景：...\\n影响范围：...\\n回滚方案：..."
+        body: "feat(scope): 简要说明\\n\\n{{! 发布前删除占位信息，复制时会自动删除此注释。}}\\n背景：...\\n影响范围：...\\n回滚方案：...",
+        isFavorite: true
       ),
       Snippet(
         id: "work-sync-daily",
@@ -250,7 +260,8 @@ final class SnippetStore: ObservableObject {
         description: "日常站会同步模板，包含昨天、今天和阻塞项。",
         trigger: ";dsu",
         groupPath: ["Work", "Sync", "Daily", "Standup"],
-        body: "Yesterday:\\n- ...\\n\\nToday:\\n- ...\\n\\nBlockers:\\n- ...\\n{{! 预览提醒：别忘记 KPI。}}"
+        body: "Yesterday:\\n- ...\\n\\nToday:\\n- ...\\n\\nBlockers:\\n- ...\\n{{! 预览提醒：别忘记 KPI。}}",
+        isFavorite: false
       )
     ]
     persist(snippets: seed, groups: [], disabledKeys: [])
@@ -306,9 +317,29 @@ final class SnippetStore: ObservableObject {
         description: "",
         trigger: meta.trigger ?? "",
         groupPath: normalizeGroupPath(meta.groupPath ?? defaultGroupPath),
-        body: String(raw[bodyRange])
+        body: String(raw[bodyRange]),
+        isFavorite: false
       )
     }
+  }
+
+  func compareSnippets(_ lhs: Snippet, _ rhs: Snippet) -> Bool {
+    if lhs.isFavorite != rhs.isFavorite {
+      return lhs.isFavorite && !rhs.isFavorite
+    }
+
+    let g1 = pathKey(lhs.groupPath)
+    let g2 = pathKey(rhs.groupPath)
+    if g1 != g2 {
+      return g1.localizedStandardCompare(g2) == .orderedAscending
+    }
+
+    let nameOrder = lhs.name.localizedStandardCompare(rhs.name)
+    if nameOrder != .orderedSame {
+      return nameOrder == .orderedAscending
+    }
+
+    return lhs.id.localizedStandardCompare(rhs.id) == .orderedAscending
   }
 
   private func normalizeGroupPath(_ path: [String]) -> [String] {
@@ -467,12 +498,7 @@ final class SnippetStore: ObservableObject {
       ))
     }
 
-    let sortedSnippets = normalizedSnippets.sorted { lhs, rhs in
-      let g1 = pathKey(lhs.groupPath)
-      let g2 = pathKey(rhs.groupPath)
-      if g1 != g2 { return g1.localizedStandardCompare(g2) == .orderedAscending }
-      return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-    }
+    let sortedSnippets = normalizedSnippets.sorted(by: compareSnippets)
 
     var nextSnippetOrderByGroupID: [String: Int] = [:]
     var diskSnippets: [DiskSnippet] = []
@@ -487,6 +513,7 @@ final class SnippetStore: ObservableObject {
         prefix: snippet.trigger,
         body: snippet.body.components(separatedBy: "\n"),
         description: snippet.description.isEmpty ? nil : snippet.description,
+        favorite: snippet.isFavorite,
         groupID: groupID,
         order: order
       ))
@@ -545,7 +572,8 @@ final class SnippetStore: ObservableObject {
         description: snippet.description ?? "",
         trigger: snippet.prefix,
         groupPath: path,
-        body: snippet.body.joined(separator: "\n")
+        body: snippet.body.joined(separator: "\n"),
+        isFavorite: snippet.favorite ?? false
       ))
     }
 
@@ -585,6 +613,7 @@ final class SnippetStore: ObservableObject {
     let prefix: String
     let body: [String]
     let description: String?
+    let favorite: Bool?
     let groupID: String
     let order: Int
 
@@ -594,6 +623,7 @@ final class SnippetStore: ObservableObject {
       case prefix
       case body
       case description
+      case favorite
       case groupID = "group_id"
       case order
     }
@@ -1283,8 +1313,8 @@ struct QuickInsertView: View {
             .id(item.id)
           case .snippet(let snippet):
             HStack(spacing: 8) {
-              Image(systemName: "text.alignleft")
-                .foregroundStyle(.secondary)
+              Image(systemName: snippet.isFavorite ? "star.fill" : "text.alignleft")
+                .foregroundStyle(snippet.isFavorite ? .yellow : .secondary)
               VStack(alignment: .leading, spacing: 2) {
                 Text(snippet.name)
                   .font(.system(size: settings.fontSize))
@@ -1422,7 +1452,7 @@ struct QuickInsertView: View {
       ].joined(separator: "\n").lowercased()
       return text.contains(q)
     }
-    .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    .sorted(by: store.compareSnippets)
   }
 
   private var filteredGroups: [QuickGroup] {
@@ -1671,7 +1701,7 @@ struct ContentView: View {
                 }
               }
               Button("在该分组新建片段") {
-                editorTarget = Snippet(id: UUID().uuidString, name: "", description: "", trigger: "", groupPath: node.path, body: "")
+                editorTarget = Snippet(id: UUID().uuidString, name: "", description: "", trigger: "", groupPath: node.path, body: "", isFavorite: false)
               }
             }
           }
@@ -1692,7 +1722,7 @@ struct ContentView: View {
             onEscape: {}
           )
           Button("新建") {
-            editorTarget = Snippet(id: UUID().uuidString, name: "", description: "", trigger: "", groupPath: selectedGroupPath, body: "")
+            editorTarget = Snippet(id: UUID().uuidString, name: "", description: "", trigger: "", groupPath: selectedGroupPath, body: "", isFavorite: false)
           }
         }
         .padding(.horizontal, 10)
@@ -1701,6 +1731,8 @@ struct ContentView: View {
         List(filteredSnippets, selection: $selectedSnippetID) { snippet in
           let isDisabled = store.isAnyAncestorDisabled(snippet.groupPath)
           HStack(spacing: 8) {
+            Image(systemName: snippet.isFavorite ? "star.fill" : "text.alignleft")
+              .foregroundStyle(snippet.isFavorite ? Color.yellow : Color.secondary)
             VStack(alignment: .leading, spacing: 2) {
               Text(snippet.name)
                 .font(.system(size: settings.fontSize))
@@ -1723,6 +1755,9 @@ struct ContentView: View {
           .opacity(isDisabled ? 0.62 : 1.0)
           .contextMenu {
             Button("复制") { copyClean(snippet.body) }
+            Button(snippet.isFavorite ? "取消星标" : "设为星标") {
+              store.toggleFavorite(for: snippet)
+            }
             Button("编辑") {
               editorTarget = snippet
             }
@@ -1749,6 +1784,11 @@ struct ContentView: View {
           Text("预览")
             .font(.headline)
           Spacer()
+          if let s = selectedSnippet {
+            Button(s.isFavorite ? "取消星标" : "星标") {
+              store.toggleFavorite(for: s)
+            }
+          }
           Button("复制") {
             if let s = selectedSnippet { copyClean(s.body) }
           }
@@ -1761,8 +1801,12 @@ struct ContentView: View {
 
         if let snippet = selectedSnippet {
           let isDisabled = store.isAnyAncestorDisabled(snippet.groupPath)
-          Text(snippet.name)
-            .font(.title3.weight(.semibold))
+          HStack(spacing: 8) {
+            Image(systemName: snippet.isFavorite ? "star.fill" : "text.alignleft")
+              .foregroundStyle(snippet.isFavorite ? .yellow : .secondary)
+            Text(snippet.name)
+              .font(.title3.weight(.semibold))
+          }
           if !snippet.description.isEmpty {
             Text(snippet.description)
               .font(.system(size: settings.fontSize))
@@ -1901,7 +1945,7 @@ struct ContentView: View {
       ].joined(separator: "\n").lowercased()
       return text.contains(q)
     }
-    .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    .sorted(by: store.compareSnippets)
   }
 
   private var groupTree: [GroupNode] {
