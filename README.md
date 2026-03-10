@@ -85,8 +85,8 @@ Storage schema:
 
 ## Release
 
-- Current version: `0.0.1` (from [`VERSION`](VERSION))
-- Recommended Git tag: `v0.0.1`
+- Current version: `0.0.2` (from [`VERSION`](VERSION))
+- Recommended Git tag: `v0.0.2`
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
 
 ## License

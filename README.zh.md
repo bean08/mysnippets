@@ -86,8 +86,8 @@ cd mysnippets
 
 ## 发布
 
-- 当前版本：`0.0.1`（来自 [`VERSION`](VERSION)）
-- 推荐 Git tag：`v0.0.1`
+- 当前版本：`0.0.2`（来自 [`VERSION`](VERSION)）
+- 推荐 Git tag：`v0.0.2`
 - 变更记录见：[CHANGELOG.md](CHANGELOG.md)
 
 ## 许可证

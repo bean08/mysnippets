@@ -827,6 +827,7 @@ final class GlobalHotKeyManager {
 
 final class QuickInsertController {
   static let shared = QuickInsertController()
+  private static let quickPanelFrameDefaultsKey = "quickPanelSavedFrame"
 
   private weak var store: SnippetStore?
   private weak var settings: UISettings?
@@ -839,6 +840,8 @@ final class QuickInsertController {
   private var hasShownAutomationAlert = false
   private var hasShownPasteFailedAlert = false
   private var presentationID = UUID()
+  private var isApplyingPanelPosition = false
+  private var panelMoveObserver: NSObjectProtocol?
 
   private init() {
     workspaceObserver = NotificationCenter.default.addObserver(
@@ -859,6 +862,9 @@ final class QuickInsertController {
     if let workspaceObserver {
       NotificationCenter.default.removeObserver(workspaceObserver)
     }
+    if let panelMoveObserver {
+      NotificationCenter.default.removeObserver(panelMoveObserver)
+    }
   }
 
   func configure(store: SnippetStore, settings: UISettings) {
@@ -877,11 +883,16 @@ final class QuickInsertController {
       previousActiveApp = lastExternalActiveApp
     }
     presentationID = UUID()
+    let targetScreen = currentTargetScreen()
+    let targetFrame = savedPanelFrame() ?? WindowLayout.quickPanelFrame(
+      for: NSSize(width: 640, height: 460),
+      screen: targetScreen
+    )
 
     if panel == nil {
       let panel = QuickSearchPanel(
-        contentRect: NSRect(x: 0, y: 0, width: 640, height: 460),
-        styleMask: [.titled, .closable, .nonactivatingPanel],
+        contentRect: targetFrame,
+        styleMask: [.titled, .closable],
         backing: .buffered,
         defer: false
       )
@@ -889,11 +900,13 @@ final class QuickInsertController {
       panel.level = .floating
       panel.isReleasedWhenClosed = false
       panel.hidesOnDeactivate = false
-      panel.collectionBehavior = [.moveToActiveSpace]
+      panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+      panel.isFloatingPanel = true
       panel.onResignKey = { [weak self] in
         self?.hide()
       }
       self.panel = panel
+      installPanelMoveObserver(for: panel)
     }
 
     let view = AnyView(QuickInsertView(
@@ -917,15 +930,85 @@ final class QuickInsertController {
     }
 
     if let panel {
-      let frame = WindowLayout.quickPanelFrame(for: panel.frame.size, screen: panel.screen ?? NSScreen.main)
-      panel.setFrame(frame, display: false)
+      apply(panel: panel, frame: targetFrame)
+      NSApp.activate(ignoringOtherApps: true)
+      panel.makeKeyAndOrderFront(nil)
+      panel.orderFrontRegardless()
+      apply(panel: panel, frame: targetFrame)
+      DispatchQueue.main.async { [weak self] in
+        guard let self, let panel = self.panel else { return }
+        if let savedFrame = self.savedPanelFrame() {
+          self.apply(panel: panel, frame: savedFrame)
+        } else {
+          self.position(panel: panel, on: self.currentTargetScreen(for: panel))
+        }
+      }
     }
-    panel?.makeKeyAndOrderFront(nil)
-    panel?.orderFrontRegardless()
   }
 
   func hide() {
     panel?.orderOut(nil)
+  }
+
+  private func currentTargetScreen() -> NSScreen? {
+    let mouseLocation = NSEvent.mouseLocation
+    if let screen = NSScreen.screens.first(where: { NSMouseInRect(mouseLocation, $0.frame, false) }) {
+      return screen
+    }
+    return NSScreen.main
+  }
+
+  private func currentTargetScreen(for panel: NSPanel) -> NSScreen? {
+    currentTargetScreen() ?? panel.screen ?? NSScreen.main
+  }
+
+  private func position(panel: NSPanel, on screen: NSScreen?) {
+    let targetFrame = WindowLayout.quickPanelFrame(for: panel.frame.size, screen: screen)
+    apply(panel: panel, frame: targetFrame)
+  }
+
+  private func apply(panel: NSPanel, frame: NSRect) {
+    isApplyingPanelPosition = true
+    panel.setFrame(frame, display: true)
+    panel.setFrameTopLeftPoint(NSPoint(x: frame.minX, y: frame.maxY))
+    isApplyingPanelPosition = false
+  }
+
+  private func installPanelMoveObserver(for panel: NSPanel) {
+    if let panelMoveObserver {
+      NotificationCenter.default.removeObserver(panelMoveObserver)
+    }
+    panelMoveObserver = NotificationCenter.default.addObserver(
+      forName: NSWindow.didMoveNotification,
+      object: panel,
+      queue: .main
+    ) { [weak self] notification in
+      guard
+        let self,
+        !self.isApplyingPanelPosition,
+        let window = notification.object as? NSWindow
+      else { return }
+      self.savePanelFrame(window.frame)
+    }
+  }
+
+  private func savePanelFrame(_ frame: NSRect) {
+    let value = NSStringFromRect(frame)
+    UserDefaults.standard.set(value, forKey: Self.quickPanelFrameDefaultsKey)
+  }
+
+  private func savedPanelFrame() -> NSRect? {
+    guard let raw = UserDefaults.standard.string(forKey: Self.quickPanelFrameDefaultsKey) else { return nil }
+    let frame = NSRectFromString(raw)
+    guard frame.width > 0, frame.height > 0 else { return nil }
+    return frame
+  }
+
+  func resetSavedPanelFrame() {
+    UserDefaults.standard.removeObject(forKey: Self.quickPanelFrameDefaultsKey)
+    if let panel {
+      position(panel: panel, on: currentTargetScreen(for: panel))
+    }
   }
 
   private func updatePanelContentIfNeeded() {
@@ -1118,7 +1201,7 @@ final class QuickSearchPanel: NSPanel {
 enum WindowLayout {
   static let mainWindowWidthRatio: CGFloat = 0.744
   static let mainWindowHeightRatio: CGFloat = 0.82
-  static let quickPanelTopInsetRatio: CGFloat = 0.16
+  static let quickPanelTopInsetRatio: CGFloat = 0.20
 
   static func defaultMainWindowSize(for screen: NSScreen? = NSScreen.main) -> NSSize {
     let visibleFrame = (screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -2398,6 +2481,10 @@ struct SettingsView: View {
         Button("恢复默认") {
           settings.hotKeyShortcut = .default
           isRecordingHotKey = false
+        }
+        .buttonStyle(.borderless)
+        Button("重置位置") {
+          QuickInsertController.shared.resetSavedPanelFrame()
         }
         .buttonStyle(.borderless)
       }

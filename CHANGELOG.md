@@ -16,3 +16,18 @@ The format is based on Keep a Changelog, and this project uses Semantic Versioni
 ### Changed
 - Added English and Chinese README files
 - Polished project metadata for open-source release
+
+## [0.0.2] - 2026-03-11
+
+### Added
+- Snippet favorites with star toggle actions and priority sorting
+- Custom global hotkey recording in Settings
+- Reset action for remembered quick panel position
+
+### Changed
+- Group selection now shows only direct snippets in the main list
+- Main-window search results now show snippet paths for matched items
+- Group tree now shows direct and total snippet counts in `direct/total` format
+- Main window default size now scales relative to the current screen
+- Quick insert panel now closes on blur and remembers user-dragged position
+- Settings UI now uses compact dropdowns for font size and row height
