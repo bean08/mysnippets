@@ -18,6 +18,7 @@ struct GroupNode: Identifiable, Hashable {
   var id: String { path.joined(separator: "/") }
   let name: String
   let path: [String]
+  let directCount: Int
   let totalCount: Int
   var children: [GroupNode]?
 }
@@ -1677,7 +1678,7 @@ struct ContentView: View {
                 .lineLimit(1)
                 .foregroundStyle(isDisabled ? .secondary : .primary)
               Spacer(minLength: 4)
-              Text("\(node.totalCount)")
+              Text("\(node.directCount)/\(node.totalCount)")
                 .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
                 .foregroundStyle(isDisabled ? .tertiary : .secondary)
             }
@@ -1740,6 +1741,7 @@ struct ContentView: View {
 
         List(filteredSnippets, selection: $selectedSnippetID) { snippet in
           let isDisabled = store.isAnyAncestorDisabled(snippet.groupPath)
+          let showPathInList = !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
           HStack(spacing: 8) {
             Image(systemName: snippet.isFavorite ? "star.fill" : "text.alignleft")
               .foregroundStyle(snippet.isFavorite ? Color.yellow : Color.secondary)
@@ -1748,7 +1750,12 @@ struct ContentView: View {
                 .font(.system(size: settings.fontSize))
                 .lineLimit(1)
                 .foregroundStyle(isDisabled ? .secondary : .primary)
-              if !snippet.description.isEmpty {
+              if showPathInList {
+                Text(groupLabel(snippet.groupPath))
+                  .font(.system(size: max(10, settings.fontSize - 2)))
+                  .foregroundStyle(isDisabled ? .tertiary : .secondary)
+                  .lineLimit(1)
+              } else if !snippet.description.isEmpty {
                 Text(snippet.description)
                   .font(.system(size: max(10, settings.fontSize - 2)))
                   .foregroundStyle(isDisabled ? .tertiary : .secondary)
@@ -1943,7 +1950,7 @@ struct ContentView: View {
   private var filteredSnippets: [Snippet] {
     let q = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     return store.snippets.filter { s in
-      if !selectedGroupPath.isEmpty && !isPrefixPath(selectedGroupPath, of: s.groupPath) { return false }
+      if !selectedGroupPath.isEmpty && s.groupPath != selectedGroupPath { return false }
       if q.isEmpty { return true }
       let text = [
         s.name,
@@ -1964,6 +1971,7 @@ struct ContentView: View {
 
   private func buildGroupTree(groups: [[String]], snippets: [Snippet]) -> [GroupNode] {
     var childrenByPath: [String: Set<String>] = [:]
+    var directByPath: [String: Int] = [:]
     var totalByPath: [String: Int] = [:]
 
     for groupPath in groups where !groupPath.isEmpty {
@@ -1975,6 +1983,8 @@ struct ContentView: View {
     }
 
     for snippet in snippets where !snippet.groupPath.isEmpty {
+      let exactKey = snippet.groupPath.joined(separator: "/")
+      directByPath[exactKey, default: 0] += 1
       for depth in 0..<snippet.groupPath.count {
         let current = Array(snippet.groupPath.prefix(depth + 1))
         totalByPath[current.joined(separator: "/"), default: 0] += 1
@@ -1993,6 +2003,7 @@ struct ContentView: View {
         return GroupNode(
           name: name,
           path: nextPath,
+          directCount: directByPath[nextKey, default: 0],
           totalCount: totalByPath[nextKey, default: 0],
           children: nextChildren.isEmpty ? nil : nextChildren
         )
