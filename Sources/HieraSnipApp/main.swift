@@ -33,15 +33,38 @@ struct GroupRenameTarget: Identifiable {
   let path: [String]
 }
 
-enum GroupSelection: Hashable {
+struct TrashSnippetEntry: Identifiable, Codable, Hashable {
+  var id: String
+  var deletedAt: Date
+  var originalGroupPath: [String]
+  var snippet: Snippet
+}
+
+struct TrashGroupEntry: Identifiable, Codable, Hashable {
+  struct GroupSnapshot: Codable, Hashable {
+    var path: [String]
+    var isHidden: Bool
+  }
+
+  var id: String
+  var deletedAt: Date
+  var originalPath: [String]
+  var groups: [GroupSnapshot]
+  var snippets: [Snippet]
+}
+
+enum SidebarSelection: Hashable {
   case all
   case group([String])
+  case trash
 }
 
 final class SnippetStore: ObservableObject {
   @Published var snippets: [Snippet] = []
   @Published var groups: [[String]] = []
   @Published var disabledGroupKeys: Set<String> = []
+  @Published var trashSnippets: [TrashSnippetEntry] = []
+  @Published var trashGroups: [TrashGroupEntry] = []
   @Published private(set) var storageRootURL: URL
   @Published private(set) var storageFileURL: URL
 
@@ -101,6 +124,8 @@ final class SnippetStore: ObservableObject {
       snippets = []
       groups = []
       disabledGroupKeys = []
+      trashSnippets = []
+      trashGroups = []
       groupIDByPathKey = [:]
       lastFingerprint = fingerprint()
       return
@@ -110,6 +135,8 @@ final class SnippetStore: ObservableObject {
     snippets = loaded.snippets.sorted(by: compareSnippets)
     groups = loaded.groups.sorted(by: comparePath)
     disabledGroupKeys = loaded.disabledKeys
+    trashSnippets = loaded.trashSnippets.sorted(by: compareTrashSnippets)
+    trashGroups = loaded.trashGroups.sorted(by: compareTrashGroups)
     groupIDByPathKey = loaded.groupIDByPathKey
     lastFingerprint = fingerprint()
   }
@@ -123,13 +150,25 @@ final class SnippetStore: ObservableObject {
     } else {
       next.append(normalized)
     }
-    persist(snippets: next, groups: groups, disabledKeys: disabledGroupKeys)
+    persist(snippets: next, groups: groups, disabledKeys: disabledGroupKeys, trashSnippets: trashSnippets, trashGroups: trashGroups)
     reload()
   }
 
   func remove(_ snippet: Snippet) {
     let next = snippets.filter { $0.id != snippet.id }
-    persist(snippets: next, groups: groups, disabledKeys: disabledGroupKeys)
+    let entry = TrashSnippetEntry(
+      id: UUID().uuidString,
+      deletedAt: Date(),
+      originalGroupPath: normalizeGroupPath(snippet.groupPath),
+      snippet: snippet
+    )
+    persist(
+      snippets: next,
+      groups: groups,
+      disabledKeys: disabledGroupKeys,
+      trashSnippets: trashSnippets + [entry],
+      trashGroups: trashGroups
+    )
     reload()
   }
 
@@ -137,7 +176,7 @@ final class SnippetStore: ObservableObject {
     guard let idx = snippets.firstIndex(where: { $0.id == snippet.id }) else { return }
     var next = snippets
     next[idx].isFavorite.toggle()
-    persist(snippets: next, groups: groups, disabledKeys: disabledGroupKeys)
+    persist(snippets: next, groups: groups, disabledKeys: disabledGroupKeys, trashSnippets: trashSnippets, trashGroups: trashGroups)
     reload()
   }
 
@@ -150,7 +189,9 @@ final class SnippetStore: ObservableObject {
     persist(
       snippets: snippets,
       groups: nextGroups.map(keyToPath),
-      disabledKeys: disabledGroupKeys
+      disabledKeys: disabledGroupKeys,
+      trashSnippets: trashSnippets,
+      trashGroups: trashGroups
     )
     reload()
   }
@@ -159,7 +200,7 @@ final class SnippetStore: ObservableObject {
     let key = pathKey(normalizeGroupPath(path))
     var next = disabledGroupKeys
     next.insert(key)
-    persist(snippets: snippets, groups: groups, disabledKeys: next)
+    persist(snippets: snippets, groups: groups, disabledKeys: next, trashSnippets: trashSnippets, trashGroups: trashGroups)
     disabledGroupKeys = next
   }
 
@@ -167,7 +208,7 @@ final class SnippetStore: ObservableObject {
     let key = pathKey(normalizeGroupPath(path))
     var next = disabledGroupKeys
     next.remove(key)
-    persist(snippets: snippets, groups: groups, disabledKeys: next)
+    persist(snippets: snippets, groups: groups, disabledKeys: next, trashSnippets: trashSnippets, trashGroups: trashGroups)
     disabledGroupKeys = next
   }
 
@@ -226,18 +267,135 @@ final class SnippetStore: ObservableObject {
     }
     groupIDByPathKey = nextGroupIDMap
 
-    persist(snippets: nextSnippets, groups: nextGroups, disabledKeys: nextDisabled)
+    persist(
+      snippets: nextSnippets,
+      groups: nextGroups,
+      disabledKeys: nextDisabled,
+      trashSnippets: trashSnippets,
+      trashGroups: trashGroups
+    )
     reload()
   }
 
   func deleteGroup(_ path: [String]) {
     let normalized = normalizeGroupPath(path)
+    let removedSnippets = snippets.filter { hasPrefix($0.groupPath, prefix: normalized) }
+    let removedGroups = groups
+      .filter { hasPrefix($0, prefix: normalized) }
+      .map { TrashGroupEntry.GroupSnapshot(path: $0, isHidden: disabledGroupKeys.contains(pathKey($0))) }
     let nextSnippets = snippets.filter { !hasPrefix($0.groupPath, prefix: normalized) }
     let nextGroups = groups.filter { !hasPrefix($0, prefix: normalized) }
     let nextDisabled = Set(disabledGroupKeys.filter { !hasPrefix(keyToPath($0), prefix: normalized) })
     groupIDByPathKey = groupIDByPathKey.filter { !hasPrefix(keyToPath($0.key), prefix: normalized) }
-    persist(snippets: nextSnippets, groups: nextGroups, disabledKeys: nextDisabled)
+    let entry = TrashGroupEntry(
+      id: UUID().uuidString,
+      deletedAt: Date(),
+      originalPath: normalized,
+      groups: removedGroups,
+      snippets: removedSnippets
+    )
+    persist(
+      snippets: nextSnippets,
+      groups: nextGroups,
+      disabledKeys: nextDisabled,
+      trashSnippets: trashSnippets,
+      trashGroups: trashGroups + [entry]
+    )
     disabledGroupKeys = nextDisabled
+    reload()
+  }
+
+  func restoreTrashSnippet(_ entry: TrashSnippetEntry) {
+    guard let index = trashSnippets.firstIndex(where: { $0.id == entry.id }) else { return }
+    var nextSnippets = snippets
+    var restored = entry.snippet
+    restored.groupPath = normalizeGroupPath(entry.originalGroupPath)
+    if nextSnippets.contains(where: { $0.id == restored.id }) {
+      restored.id = UUID().uuidString
+    }
+    nextSnippets.append(restored)
+    var nextTrashSnippets = trashSnippets
+    nextTrashSnippets.remove(at: index)
+    persist(
+      snippets: nextSnippets,
+      groups: groups,
+      disabledKeys: disabledGroupKeys,
+      trashSnippets: nextTrashSnippets,
+      trashGroups: trashGroups
+    )
+    reload()
+  }
+
+  func restoreTrashGroup(_ entry: TrashGroupEntry) {
+    guard let index = trashGroups.firstIndex(where: { $0.id == entry.id }) else { return }
+
+    var nextGroups = Set(groups.map(pathKey))
+    var nextDisabled = disabledGroupKeys
+    for snapshot in entry.groups.sorted(by: { $0.path.count < $1.path.count }) {
+      for depth in 0..<snapshot.path.count {
+        nextGroups.insert(pathKey(Array(snapshot.path.prefix(depth + 1))))
+      }
+      if snapshot.isHidden {
+        nextDisabled.insert(pathKey(snapshot.path))
+      } else {
+        nextDisabled.remove(pathKey(snapshot.path))
+      }
+    }
+
+    var nextSnippets = snippets
+    for snippet in entry.snippets {
+      var restored = snippet
+      restored.groupPath = normalizeGroupPath(snippet.groupPath)
+      if nextSnippets.contains(where: { $0.id == restored.id }) {
+        restored.id = UUID().uuidString
+      }
+      nextSnippets.append(restored)
+    }
+
+    var nextTrashGroups = trashGroups
+    nextTrashGroups.remove(at: index)
+    persist(
+      snippets: nextSnippets,
+      groups: nextGroups.map(keyToPath),
+      disabledKeys: nextDisabled,
+      trashSnippets: trashSnippets,
+      trashGroups: nextTrashGroups
+    )
+    reload()
+  }
+
+  func permanentlyDeleteTrashSnippet(_ entry: TrashSnippetEntry) {
+    let nextTrashSnippets = trashSnippets.filter { $0.id != entry.id }
+    persist(
+      snippets: snippets,
+      groups: groups,
+      disabledKeys: disabledGroupKeys,
+      trashSnippets: nextTrashSnippets,
+      trashGroups: trashGroups
+    )
+    reload()
+  }
+
+  func permanentlyDeleteTrashGroup(_ entry: TrashGroupEntry) {
+    let nextTrashGroups = trashGroups.filter { $0.id != entry.id }
+    persist(
+      snippets: snippets,
+      groups: groups,
+      disabledKeys: disabledGroupKeys,
+      trashSnippets: trashSnippets,
+      trashGroups: nextTrashGroups
+    )
+    reload()
+  }
+
+  func emptyTrash() {
+    persist(
+      snippets: snippets,
+      groups: groups,
+      disabledKeys: disabledGroupKeys,
+      trashSnippets: [],
+      trashGroups: []
+    )
     reload()
   }
 
@@ -265,7 +423,7 @@ final class SnippetStore: ObservableObject {
         isFavorite: false
       )
     ]
-    persist(snippets: seed, groups: [], disabledKeys: [])
+    persist(snippets: seed, groups: [], disabledKeys: [], trashSnippets: [], trashGroups: [])
   }
 
   private func startWatcher() {
@@ -341,6 +499,20 @@ final class SnippetStore: ObservableObject {
     }
 
     return lhs.id.localizedStandardCompare(rhs.id) == .orderedAscending
+  }
+
+  func compareTrashSnippets(_ lhs: TrashSnippetEntry, _ rhs: TrashSnippetEntry) -> Bool {
+    if lhs.deletedAt != rhs.deletedAt {
+      return lhs.deletedAt > rhs.deletedAt
+    }
+    return compareSnippets(lhs.snippet, rhs.snippet)
+  }
+
+  func compareTrashGroups(_ lhs: TrashGroupEntry, _ rhs: TrashGroupEntry) -> Bool {
+    if lhs.deletedAt != rhs.deletedAt {
+      return lhs.deletedAt > rhs.deletedAt
+    }
+    return pathKey(lhs.originalPath).localizedStandardCompare(pathKey(rhs.originalPath)) == .orderedAscending
   }
 
   private func normalizeGroupPath(_ path: [String]) -> [String] {
@@ -457,11 +629,19 @@ final class SnippetStore: ObservableObject {
     persist(
       snippets: migratedSnippets,
       groups: groupSet.map(keyToPath),
-      disabledKeys: migratedDisabled
+      disabledKeys: migratedDisabled,
+      trashSnippets: [],
+      trashGroups: []
     )
   }
 
-  private func persist(snippets: [Snippet], groups: [[String]], disabledKeys: Set<String>) {
+  private func persist(
+    snippets: [Snippet],
+    groups: [[String]],
+    disabledKeys: Set<String>,
+    trashSnippets: [TrashSnippetEntry],
+    trashGroups: [TrashGroupEntry]
+  ) {
     let normalizedSnippets = snippets.map { snippet -> Snippet in
       var next = snippet
       next.groupPath = normalizeGroupPath(snippet.groupPath)
@@ -520,7 +700,49 @@ final class SnippetStore: ObservableObject {
       ))
     }
 
-    let disk = DiskStore(version: "1.0", groups: diskGroups, snippets: diskSnippets)
+    let disk = DiskStore(
+      version: "1.1",
+      groups: diskGroups,
+      snippets: diskSnippets,
+      trash: DiskTrash(
+        snippets: trashSnippets.map { entry in
+          DiskTrashSnippet(
+            id: entry.id,
+            deletedAt: entry.deletedAt,
+            originalGroupPath: entry.originalGroupPath,
+            snippet: DiskTrashSnippetPayload(
+              id: entry.snippet.id,
+              name: entry.snippet.name,
+              prefix: entry.snippet.trigger,
+              body: entry.snippet.body.components(separatedBy: "\n"),
+              description: entry.snippet.description.isEmpty ? nil : entry.snippet.description,
+              favorite: entry.snippet.isFavorite
+            )
+          )
+        },
+        groups: trashGroups.map { entry in
+          DiskTrashGroup(
+            id: entry.id,
+            deletedAt: entry.deletedAt,
+            originalPath: entry.originalPath,
+            groups: entry.groups.map { snapshot in
+              DiskTrashGroupSnapshot(path: snapshot.path, hidden: snapshot.isHidden)
+            },
+            snippets: entry.snippets.map { snippet in
+              DiskTrashGroupSnippet(
+                id: snippet.id,
+                name: snippet.name,
+                prefix: snippet.trigger,
+                body: snippet.body.components(separatedBy: "\n"),
+                description: snippet.description.isEmpty ? nil : snippet.description,
+                favorite: snippet.isFavorite,
+                groupPath: snippet.groupPath
+              )
+            }
+          )
+        }
+      )
+    )
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     guard let data = try? encoder.encode(disk) else { return }
@@ -528,7 +750,7 @@ final class SnippetStore: ObservableObject {
     groupIDByPathKey = nextGroupIDByPathKey
   }
 
-  private func decodeDiskStore(_ disk: DiskStore) -> (snippets: [Snippet], groups: [[String]], disabledKeys: Set<String>, groupIDByPathKey: [String: String]) {
+  private func decodeDiskStore(_ disk: DiskStore) -> (snippets: [Snippet], groups: [[String]], disabledKeys: Set<String>, trashSnippets: [TrashSnippetEntry], trashGroups: [TrashGroupEntry], groupIDByPathKey: [String: String]) {
     let groupByID = Dictionary(uniqueKeysWithValues: disk.groups.map { ($0.id, $0) })
     var pathCache: [String: [String]] = [:]
 
@@ -578,10 +800,54 @@ final class SnippetStore: ObservableObject {
       ))
     }
 
+    let loadedTrashSnippets = (disk.trash?.snippets ?? []).map { entry in
+      TrashSnippetEntry(
+        id: entry.id,
+        deletedAt: entry.deletedAt,
+        originalGroupPath: normalizeGroupPath(entry.originalGroupPath),
+        snippet: Snippet(
+          id: entry.snippet.id,
+          name: entry.snippet.name,
+          description: entry.snippet.description ?? "",
+          trigger: entry.snippet.prefix,
+          groupPath: normalizeGroupPath(entry.originalGroupPath),
+          body: entry.snippet.body.joined(separator: "\n"),
+          isFavorite: entry.snippet.favorite ?? false
+        )
+      )
+    }
+
+    let loadedTrashGroups = (disk.trash?.groups ?? []).map { entry in
+      TrashGroupEntry(
+        id: entry.id,
+        deletedAt: entry.deletedAt,
+        originalPath: normalizeGroupPath(entry.originalPath),
+        groups: entry.groups.map { snapshot in
+          TrashGroupEntry.GroupSnapshot(
+            path: normalizeGroupPath(snapshot.path),
+            isHidden: snapshot.hidden
+          )
+        },
+        snippets: entry.snippets.map { snippet in
+          Snippet(
+            id: snippet.id,
+            name: snippet.name,
+            description: snippet.description ?? "",
+            trigger: snippet.prefix,
+            groupPath: normalizeGroupPath(snippet.groupPath),
+            body: snippet.body.joined(separator: "\n"),
+            isFavorite: snippet.favorite ?? false
+          )
+        }
+      )
+    }
+
     return (
       snippets: loadedSnippets,
       groups: loadedGroups.map(keyToPath),
       disabledKeys: loadedDisabledKeys,
+      trashSnippets: loadedTrashSnippets,
+      trashGroups: loadedTrashGroups,
       groupIDByPathKey: loadedGroupIDByPathKey
     )
   }
@@ -590,6 +856,7 @@ final class SnippetStore: ObservableObject {
     let version: String
     let groups: [DiskGroup]
     let snippets: [DiskSnippet]
+    let trash: DiskTrash?
   }
 
   private struct DiskGroup: Codable {
@@ -627,6 +894,75 @@ final class SnippetStore: ObservableObject {
       case favorite
       case groupID = "group_id"
       case order
+    }
+  }
+
+  private struct DiskTrash: Codable {
+    let snippets: [DiskTrashSnippet]
+    let groups: [DiskTrashGroup]
+  }
+
+  private struct DiskTrashSnippet: Codable {
+    let id: String
+    let deletedAt: Date
+    let originalGroupPath: [String]
+    let snippet: DiskTrashSnippetPayload
+
+    enum CodingKeys: String, CodingKey {
+      case id
+      case deletedAt = "deleted_at"
+      case originalGroupPath = "original_group_path"
+      case snippet
+    }
+  }
+
+  private struct DiskTrashSnippetPayload: Codable {
+    let id: String
+    let name: String
+    let prefix: String
+    let body: [String]
+    let description: String?
+    let favorite: Bool?
+  }
+
+  private struct DiskTrashGroup: Codable {
+    let id: String
+    let deletedAt: Date
+    let originalPath: [String]
+    let groups: [DiskTrashGroupSnapshot]
+    let snippets: [DiskTrashGroupSnippet]
+
+    enum CodingKeys: String, CodingKey {
+      case id
+      case deletedAt = "deleted_at"
+      case originalPath = "original_path"
+      case groups
+      case snippets
+    }
+  }
+
+  private struct DiskTrashGroupSnapshot: Codable {
+    let path: [String]
+    let hidden: Bool
+  }
+
+  private struct DiskTrashGroupSnippet: Codable {
+    let id: String
+    let name: String
+    let prefix: String
+    let body: [String]
+    let description: String?
+    let favorite: Bool?
+    let groupPath: [String]
+
+    enum CodingKeys: String, CodingKey {
+      case id
+      case name
+      case prefix
+      case body
+      case description
+      case favorite
+      case groupPath = "group_path"
     }
   }
 }
@@ -1864,14 +2200,26 @@ struct QuickSearchField: NSViewRepresentable {
   }
 }
 
+private enum TrashListItem: Identifiable, Hashable {
+  case snippet(TrashSnippetEntry)
+  case group(TrashGroupEntry)
+
+  var id: String {
+    switch self {
+    case .snippet(let entry): return "ts:\(entry.id)"
+    case .group(let entry): return "tg:\(entry.id)"
+    }
+  }
+}
+
 struct ContentView: View {
   @EnvironmentObject private var store: SnippetStore
   @EnvironmentObject private var settings: UISettings
 
   @State private var search = ""
   @State private var focusMainSearchField = false
-  @State private var selectedGroupSelection: GroupSelection = .all
-  @State private var selectedSnippetID: String?
+  @State private var selectedSidebarSelection: SidebarSelection = .all
+  @State private var selectedItemID: String?
 
   @State private var editorTarget: Snippet? = nil
   @State private var newGroupTarget: GroupCreateTarget? = nil
@@ -1879,266 +2227,17 @@ struct ContentView: View {
 
   var body: some View {
     NavigationSplitView {
-      VStack(spacing: 8) {
-        HStack {
-          Text("分组")
-            .font(.headline)
-          Spacer()
-          Button("新建分组") { newGroupTarget = GroupCreateTarget(parentPath: selectedGroupPath) }
-            .buttonStyle(.borderless)
-          Button("刷新") { store.reload() }
-            .buttonStyle(.borderless)
-        }
-        .padding(.horizontal, 10)
-        .padding(.top, 8)
-
-        List(selection: $selectedGroupSelection) {
-          HStack(spacing: 6) {
-            Text("全部")
-              .font(.system(size: settings.fontSize))
-              .lineLimit(1)
-            Spacer(minLength: 4)
-            Text("\(globalVisibleSnippetCount)")
-              .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
-              .foregroundStyle(.secondary)
-          }
-          .tag(GroupSelection.all)
-
-          OutlineGroup(groupTree, children: \.children) { node in
-            let isDisabled = store.isAnyAncestorDisabled(node.path)
-            HStack(spacing: 6) {
-              Text(node.name)
-                .font(.system(size: settings.fontSize))
-                .lineLimit(1)
-                .foregroundStyle(isDisabled ? .secondary : .primary)
-              Spacer(minLength: 4)
-              Text("\(node.directCount)/\(node.totalCount)")
-                .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
-                .foregroundStyle(isDisabled ? .tertiary : .secondary)
-            }
-            .opacity(isDisabled ? 0.55 : 1.0)
-            .tag(GroupSelection.group(node.path))
-            .contextMenu {
-              Button("新建子分组") {
-                newGroupTarget = GroupCreateTarget(parentPath: node.path)
-              }
-              Button("重命名分组") {
-                renameGroupTarget = GroupRenameTarget(path: node.path)
-              }
-              if store.isGroupDisabled(node.path) {
-                Button("启用分组") {
-                  store.enableGroup(node.path)
-                }
-              } else {
-                Button("禁用分组") {
-                  store.disableGroup(node.path)
-                }
-              }
-              Button("删除分组", role: .destructive) {
-                let snippetCount = store.snippets.filter { isPrefixPath(node.path, of: $0.groupPath) }.count
-                let subgroupCount = store.groups.filter { isPrefixPath(node.path, of: $0) }.count - 1
-                if confirmDeleteGroup(path: node.path, snippetCount: snippetCount, subgroupCount: max(0, subgroupCount)) {
-                  store.deleteGroup(node.path)
-                  if case let .group(current) = selectedGroupSelection, isPrefixPath(node.path, of: current) {
-                    let parent = Array(node.path.dropLast())
-                    selectedGroupSelection = parent.isEmpty ? .all : .group(parent)
-                  }
-                }
-              }
-              Button("在该分组新建片段") {
-                editorTarget = Snippet(id: UUID().uuidString, name: "", description: "", trigger: "", groupPath: node.path, body: "", isFavorite: false)
-              }
-            }
-          }
-        }
-        .environment(\.defaultMinListRowHeight, settings.rowHeight)
-      }
-      .navigationSplitViewColumnWidth(min: 245, ideal: 270, max: 320)
+      sidebarPane
     } content: {
-      VStack(spacing: 8) {
-        HStack(spacing: 8) {
-          QuickSearchField(
-            placeholder: "搜索名称、触发词、正文",
-            text: $search,
-            shouldFocus: $focusMainSearchField,
-            onMoveUp: { moveSelection(step: -1) },
-            onMoveDown: { moveSelection(step: 1) },
-            onSubmit: {},
-            onEscape: {}
-          )
-          Button("新建") {
-            editorTarget = Snippet(id: UUID().uuidString, name: "", description: "", trigger: "", groupPath: selectedGroupPath, body: "", isFavorite: false)
-          }
-        }
-        .padding(.horizontal, 10)
-        .padding(.top, 8)
-
-        List(filteredSnippets, selection: $selectedSnippetID) { snippet in
-          let isDisabled = store.isAnyAncestorDisabled(snippet.groupPath)
-          let showPathInList = !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-          HStack(spacing: 8) {
-            Image(systemName: snippet.isFavorite ? "star.fill" : "text.alignleft")
-              .foregroundStyle(snippet.isFavorite ? Color.yellow : Color.secondary)
-            VStack(alignment: .leading, spacing: 2) {
-              Text(snippet.name)
-                .font(.system(size: settings.fontSize))
-                .lineLimit(1)
-                .foregroundStyle(isDisabled ? .secondary : .primary)
-              if showPathInList {
-                Text(groupLabel(snippet.groupPath))
-                  .font(.system(size: max(10, settings.fontSize - 2)))
-                  .foregroundStyle(isDisabled ? .tertiary : .secondary)
-                  .lineLimit(1)
-              } else if !snippet.description.isEmpty {
-                Text(snippet.description)
-                  .font(.system(size: max(10, settings.fontSize - 2)))
-                  .foregroundStyle(isDisabled ? .tertiary : .secondary)
-                  .lineLimit(1)
-              }
-            }
-            Spacer(minLength: 4)
-            if !snippet.trigger.isEmpty {
-              Text(snippet.trigger)
-                .font(.system(size: max(10, settings.fontSize - 1), weight: .medium, design: .monospaced))
-                .foregroundStyle(isDisabled ? .tertiary : .secondary)
-            }
-          }
-          .opacity(isDisabled ? 0.62 : 1.0)
-          .contextMenu {
-            Button("复制") { copyClean(snippet.body) }
-            Button(snippet.isFavorite ? "取消星标" : "设为星标") {
-              store.toggleFavorite(for: snippet)
-            }
-            Button("编辑") {
-              editorTarget = snippet
-            }
-            Button("删除", role: .destructive) { store.remove(snippet) }
-          }
-          .tag(snippet.id)
-        }
-        .environment(\.defaultMinListRowHeight, settings.rowHeight)
-      }
-      .onMoveCommand { direction in
-        switch direction {
-        case .down:
-          moveSelection(step: 1)
-        case .up:
-          moveSelection(step: -1)
-        default:
-          break
-        }
-      }
-      .navigationSplitViewColumnWidth(min: 330, ideal: 382, max: 476)
+      contentPane
     } detail: {
-      VStack(alignment: .leading, spacing: 8) {
-        HStack {
-          Text("预览")
-            .font(.headline)
-          Spacer()
-          if let s = selectedSnippet {
-            Button(s.isFavorite ? "取消星标" : "星标") {
-              store.toggleFavorite(for: s)
-            }
-          }
-          Button("复制") {
-            if let s = selectedSnippet { copyClean(s.body) }
-          }
-          Button("编辑") {
-            if let s = selectedSnippet {
-              editorTarget = s
-            }
-          }
-        }
-
-        if let snippet = selectedSnippet {
-          let isDisabled = store.isAnyAncestorDisabled(snippet.groupPath)
-          HStack(spacing: 8) {
-            Image(systemName: snippet.isFavorite ? "star.fill" : "text.alignleft")
-              .foregroundStyle(snippet.isFavorite ? .yellow : .secondary)
-            Text(snippet.name)
-              .font(.title3.weight(.semibold))
-          }
-          if !snippet.description.isEmpty {
-            Text(snippet.description)
-              .font(.system(size: settings.fontSize))
-              .foregroundStyle(.secondary)
-          }
-          Text(groupLabel(snippet.groupPath))
-            .font(.system(size: settings.fontSize))
-            .foregroundStyle(.secondary)
-          if isDisabled {
-            Text("该 snippet 所在分组已禁用，仍可在管理页预览和编辑，但不会出现在悬浮窗搜索中。")
-              .font(.caption)
-              .foregroundStyle(.orange)
-          }
-
-          ScrollView {
-            renderPreviewText(snippet.body)
-              .font(.system(size: settings.fontSize, design: .monospaced))
-              .textSelection(.enabled)
-              .frame(maxWidth: .infinity, alignment: .leading)
-              .padding(10)
-          }
-          .background(Color(NSColor.textBackgroundColor))
-          .cornerRadius(8)
-        } else if case let .group(path) = selectedGroupSelection {
-          let isDisabled = store.isAnyAncestorDisabled(path)
-          let groupSnippets = store.snippets.filter { isPrefixPath(path, of: $0.groupPath) }
-          let directSnippets = store.snippets.filter { $0.groupPath == path }
-          let subgroupCount = store.groups.filter { isPrefixPath(path, of: $0) }.count - 1
-
-          Text(path.last ?? "分组")
-            .font(.title3.weight(.semibold))
-          Text(groupLabel(path))
-            .font(.system(size: settings.fontSize))
-            .foregroundStyle(.secondary)
-          if isDisabled {
-            Text("该分组已禁用，仍可在管理页预览和编辑，但不会出现在悬浮窗搜索中。")
-              .font(.caption)
-              .foregroundStyle(.orange)
-          }
-
-          VStack(alignment: .leading, spacing: 6) {
-            Text("本组 snippet: \(directSnippets.count)")
-            Text("包含子组共 snippet: \(groupSnippets.count)")
-            Text("子分组数量: \(max(0, subgroupCount))")
-          }
-          .font(.system(size: settings.fontSize))
-
-          if let firstSnippet = groupSnippets.first {
-            Divider()
-            Text("示例预览")
-              .font(.headline)
-            ScrollView {
-              renderPreviewText(firstSnippet.body)
-                .font(.system(size: settings.fontSize, design: .monospaced))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(10)
-            }
-            .background(Color(NSColor.textBackgroundColor))
-            .cornerRadius(8)
-          } else {
-            Spacer()
-            Text("该分组下暂无 snippet")
-              .foregroundStyle(.secondary)
-            Spacer()
-          }
-        } else {
-          Text("未选择 snippet")
-            .foregroundStyle(.secondary)
-        }
-
-        Text("存储文件: \(store.storageFileURL.path)")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-      }
-      .padding(12)
+      detailPane
+        .padding(12)
     }
     .sheet(item: $editorTarget) { target in
       SnippetEditorSheet(snippet: target) { updated in
         store.upsert(updated)
-        selectedSnippetID = updated.id
+        selectedItemID = updated.id
       }
       .environmentObject(settings)
     }
@@ -2146,39 +2245,507 @@ struct ContentView: View {
       GroupCreateSheet(parentPath: target.parentPath) { name in
         let groupPath = target.parentPath + [name]
         store.createGroup(groupPath)
-        selectedGroupSelection = .group(groupPath)
+        selectedSidebarSelection = .group(groupPath)
       }
     }
     .sheet(item: $renameGroupTarget) { target in
       GroupRenameSheet(path: target.path) { newName in
         store.renameGroup(from: target.path, to: newName)
-        selectedGroupSelection = .group(Array(target.path.dropLast()) + [newName])
+        selectedSidebarSelection = .group(Array(target.path.dropLast()) + [newName])
       }
     }
     .onAppear {
       focusMainSearchField = true
-      if selectedSnippetID == nil {
-        selectedSnippetID = filteredSnippets.first?.id
+      selectFirstItemIfNeeded()
+    }
+    .onChange(of: selectedSidebarSelection) { _ in
+      search = ""
+      selectFirstItem(force: true)
+    }
+    .onChange(of: normalItemIDs) { _ in
+      if selectedSidebarSelection != .trash {
+        selectFirstItemIfNeeded()
       }
     }
-    .onChange(of: filteredSnippets.map(\.id)) { ids in
-      if let current = selectedSnippetID, ids.contains(current) { return }
-      selectedSnippetID = ids.first
+    .onChange(of: trashItemIDs) { _ in
+      if selectedSidebarSelection == .trash {
+        selectFirstItemIfNeeded()
+      }
+    }
+  }
+
+  private var sidebarPane: some View {
+    VStack(spacing: 8) {
+      HStack {
+        Text("分组")
+          .font(.headline)
+        Spacer()
+        if selectedSidebarSelection != .trash {
+          Button("新建分组") { newGroupTarget = GroupCreateTarget(parentPath: selectedGroupPath) }
+            .buttonStyle(.borderless)
+        }
+        Button("刷新") { store.reload() }
+          .buttonStyle(.borderless)
+      }
+      .padding(.horizontal, 10)
+      .padding(.top, 8)
+
+      List(selection: $selectedSidebarSelection) {
+        HStack(spacing: 6) {
+          Text("全部")
+            .font(.system(size: settings.fontSize))
+            .lineLimit(1)
+          Spacer(minLength: 4)
+          Text("\(globalVisibleSnippetCount)")
+            .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
+            .foregroundStyle(.secondary)
+        }
+        .tag(SidebarSelection.all)
+
+        OutlineGroup(groupTree, children: \.children) { node in
+          let isDisabled = store.isAnyAncestorDisabled(node.path)
+          HStack(spacing: 6) {
+            Text(node.name)
+              .font(.system(size: settings.fontSize))
+              .lineLimit(1)
+              .foregroundStyle(isDisabled ? .secondary : .primary)
+            Spacer(minLength: 4)
+            Text("\(node.directCount)/\(node.totalCount)")
+              .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
+              .foregroundStyle(isDisabled ? .tertiary : .secondary)
+          }
+          .opacity(isDisabled ? 0.55 : 1.0)
+          .tag(SidebarSelection.group(node.path))
+          .contextMenu {
+            Button("新建子分组") {
+              newGroupTarget = GroupCreateTarget(parentPath: node.path)
+            }
+            Button("重命名分组") {
+              renameGroupTarget = GroupRenameTarget(path: node.path)
+            }
+            if store.isGroupDisabled(node.path) {
+              Button("启用分组") {
+                store.enableGroup(node.path)
+              }
+            } else {
+              Button("禁用分组") {
+                store.disableGroup(node.path)
+              }
+            }
+            Button("删除分组", role: .destructive) {
+              let snippetCount = store.snippets.filter { isPrefixPath(node.path, of: $0.groupPath) }.count
+              let subgroupCount = store.groups.filter { isPrefixPath(node.path, of: $0) }.count - 1
+              if confirmDeleteGroup(path: node.path, snippetCount: snippetCount, subgroupCount: max(0, subgroupCount)) {
+                store.deleteGroup(node.path)
+                if case let .group(current) = selectedSidebarSelection, isPrefixPath(node.path, of: current) {
+                  let parent = Array(node.path.dropLast())
+                  selectedSidebarSelection = parent.isEmpty ? .all : .group(parent)
+                }
+              }
+            }
+            Button("在该分组新建片段") {
+              editorTarget = Snippet(id: UUID().uuidString, name: "", description: "", trigger: "", groupPath: node.path, body: "", isFavorite: false)
+            }
+          }
+        }
+
+        HStack(spacing: 6) {
+          Image(systemName: "trash")
+            .foregroundStyle(.secondary)
+          Text("回收站")
+            .font(.system(size: settings.fontSize))
+            .lineLimit(1)
+          Spacer(minLength: 4)
+          Text("\(trashItemCount)")
+            .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
+            .foregroundStyle(.secondary)
+        }
+        .tag(SidebarSelection.trash)
+      }
+      .environment(\.defaultMinListRowHeight, settings.rowHeight)
+    }
+    .navigationSplitViewColumnWidth(min: 245, ideal: 270, max: 320)
+  }
+
+  private var contentPane: some View {
+    VStack(spacing: 8) {
+      HStack(spacing: 8) {
+        QuickSearchField(
+          placeholder: selectedSidebarSelection == .trash ? "搜索回收站内容" : "搜索名称、触发词、正文",
+          text: $search,
+          shouldFocus: $focusMainSearchField,
+          onMoveUp: { moveSelection(step: -1) },
+          onMoveDown: { moveSelection(step: 1) },
+          onSubmit: {},
+          onEscape: {}
+        )
+        if selectedSidebarSelection == .trash {
+          Button("清空回收站", role: .destructive) {
+            if confirmEmptyTrash(itemCount: trashItemCount) {
+              store.emptyTrash()
+            }
+          }
+          .disabled(trashItemCount == 0)
+        } else {
+          Button("新建") {
+            editorTarget = Snippet(id: UUID().uuidString, name: "", description: "", trigger: "", groupPath: selectedGroupPath, body: "", isFavorite: false)
+          }
+        }
+      }
+      .padding(.horizontal, 10)
+      .padding(.top, 8)
+
+      if selectedSidebarSelection == .trash {
+        List(filteredTrashItems, selection: $selectedItemID) { item in
+          trashRow(for: item)
+            .tag(item.id)
+        }
+      } else {
+        List(filteredSnippets, selection: $selectedItemID) { snippet in
+          snippetRow(for: snippet)
+            .tag(snippet.id)
+        }
+      }
+    }
+    .environment(\.defaultMinListRowHeight, settings.rowHeight)
+    .onMoveCommand { direction in
+      switch direction {
+      case .down:
+        moveSelection(step: 1)
+      case .up:
+        moveSelection(step: -1)
+      default:
+        break
+      }
+    }
+    .navigationSplitViewColumnWidth(min: 330, ideal: 382, max: 476)
+  }
+
+  @ViewBuilder
+  private func snippetRow(for snippet: Snippet) -> some View {
+    let isDisabled = store.isAnyAncestorDisabled(snippet.groupPath)
+    let showPathInList = !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    HStack(spacing: 8) {
+      Image(systemName: snippet.isFavorite ? "star.fill" : "text.alignleft")
+        .foregroundStyle(snippet.isFavorite ? Color.yellow : Color.secondary)
+      VStack(alignment: .leading, spacing: 2) {
+        Text(snippet.name)
+          .font(.system(size: settings.fontSize))
+          .lineLimit(1)
+          .foregroundStyle(isDisabled ? .secondary : .primary)
+        if showPathInList {
+          Text(groupLabel(snippet.groupPath))
+            .font(.system(size: max(10, settings.fontSize - 2)))
+            .foregroundStyle(isDisabled ? .tertiary : .secondary)
+            .lineLimit(1)
+        } else if !snippet.description.isEmpty {
+          Text(snippet.description)
+            .font(.system(size: max(10, settings.fontSize - 2)))
+            .foregroundStyle(isDisabled ? .tertiary : .secondary)
+            .lineLimit(1)
+        }
+      }
+      Spacer(minLength: 4)
+      if !snippet.trigger.isEmpty {
+        Text(snippet.trigger)
+          .font(.system(size: max(10, settings.fontSize - 1), weight: .medium, design: .monospaced))
+          .foregroundStyle(isDisabled ? .tertiary : .secondary)
+      }
+    }
+    .opacity(isDisabled ? 0.62 : 1.0)
+    .contextMenu {
+      Button("复制") { copyClean(snippet.body) }
+      Button(snippet.isFavorite ? "取消星标" : "设为星标") {
+        store.toggleFavorite(for: snippet)
+      }
+      Button("编辑") {
+        editorTarget = snippet
+      }
+      Button("删除", role: .destructive) {
+        store.remove(snippet)
+      }
+    }
+  }
+
+  @ViewBuilder
+  private func trashRow(for item: TrashListItem) -> some View {
+    switch item {
+    case .snippet(let entry):
+      HStack(spacing: 8) {
+        Image(systemName: "text.alignleft")
+          .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(entry.snippet.name)
+            .font(.system(size: settings.fontSize))
+            .lineLimit(1)
+          Text("原位置: \(groupLabel(entry.originalGroupPath))")
+            .font(.system(size: max(10, settings.fontSize - 2)))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+        Spacer(minLength: 4)
+        Text(trashDateLabel(entry.deletedAt))
+          .font(.system(size: max(10, settings.fontSize - 2)))
+          .foregroundStyle(.secondary)
+      }
+      .contextMenu {
+        Button("恢复") {
+          store.restoreTrashSnippet(entry)
+        }
+        Button("立即删除", role: .destructive) {
+          store.permanentlyDeleteTrashSnippet(entry)
+        }
+      }
+    case .group(let entry):
+      HStack(spacing: 8) {
+        Image(systemName: "folder")
+          .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(entry.originalPath.last ?? "分组")
+            .font(.system(size: settings.fontSize))
+            .lineLimit(1)
+          Text("原位置: \(groupLabel(entry.originalPath))")
+            .font(.system(size: max(10, settings.fontSize - 2)))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+        Spacer(minLength: 4)
+        Text(trashDateLabel(entry.deletedAt))
+          .font(.system(size: max(10, settings.fontSize - 2)))
+          .foregroundStyle(.secondary)
+      }
+      .contextMenu {
+        Button("恢复") {
+          store.restoreTrashGroup(entry)
+        }
+        Button("立即删除", role: .destructive) {
+          store.permanentlyDeleteTrashGroup(entry)
+        }
+      }
+    }
+  }
+
+  @ViewBuilder
+  private var detailPane: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      HStack {
+        Text("预览")
+          .font(.headline)
+        Spacer()
+        if let snippet = selectedSnippet {
+          Button(snippet.isFavorite ? "取消星标" : "星标") {
+            store.toggleFavorite(for: snippet)
+          }
+          Button("复制") {
+            copyClean(snippet.body)
+          }
+          Button("编辑") {
+            editorTarget = snippet
+          }
+        } else if let trashItem = selectedTrashItem {
+          Button("恢复") {
+            restoreTrashItem(trashItem)
+          }
+          Button("立即删除", role: .destructive) {
+            permanentlyDeleteTrashItem(trashItem)
+          }
+        }
+      }
+
+      if selectedSidebarSelection == .trash {
+        trashDetailView
+      } else if let snippet = selectedSnippet {
+        snippetDetailView(snippet)
+      } else if case let .group(path) = selectedSidebarSelection {
+        groupDetailView(path)
+      } else {
+        Text("未选择 snippet")
+          .foregroundStyle(.secondary)
+      }
+
+      Text("存储文件: \(store.storageFileURL.path)")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+  }
+
+  @ViewBuilder
+  private var trashDetailView: some View {
+    if let item = selectedTrashItem {
+      switch item {
+      case .snippet(let entry):
+        HStack(spacing: 8) {
+          Image(systemName: "text.alignleft")
+            .foregroundStyle(.secondary)
+          Text(entry.snippet.name)
+            .font(.title3.weight(.semibold))
+        }
+        if !entry.snippet.description.isEmpty {
+          Text(entry.snippet.description)
+            .font(.system(size: settings.fontSize))
+            .foregroundStyle(.secondary)
+        }
+        Text("原位置: \(groupLabel(entry.originalGroupPath))")
+          .font(.system(size: settings.fontSize))
+          .foregroundStyle(.secondary)
+        Text("删除时间: \(trashDateLabel(entry.deletedAt))")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+
+        ScrollView {
+          renderPreviewText(entry.snippet.body)
+            .font(.system(size: settings.fontSize, design: .monospaced))
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+        }
+        .background(Color(NSColor.textBackgroundColor))
+        .cornerRadius(8)
+      case .group(let entry):
+        Text(entry.originalPath.last ?? "分组")
+          .font(.title3.weight(.semibold))
+        Text("原位置: \(groupLabel(entry.originalPath))")
+          .font(.system(size: settings.fontSize))
+          .foregroundStyle(.secondary)
+        Text("删除时间: \(trashDateLabel(entry.deletedAt))")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+
+        VStack(alignment: .leading, spacing: 6) {
+          Text("分组数量: \(entry.groups.count)")
+          Text("包含 snippet: \(entry.snippets.count)")
+        }
+        .font(.system(size: settings.fontSize))
+
+        if let firstSnippet = entry.snippets.sorted(by: store.compareSnippets).first {
+          Divider()
+          Text("示例预览")
+            .font(.headline)
+          ScrollView {
+            renderPreviewText(firstSnippet.body)
+              .font(.system(size: settings.fontSize, design: .monospaced))
+              .textSelection(.enabled)
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .padding(10)
+          }
+          .background(Color(NSColor.textBackgroundColor))
+          .cornerRadius(8)
+        } else {
+          Spacer()
+          Text("该回收站分组中暂无 snippet")
+            .foregroundStyle(.secondary)
+          Spacer()
+        }
+      }
+    } else {
+      Spacer()
+      Text("回收站为空")
+        .foregroundStyle(.secondary)
+      Spacer()
+    }
+  }
+
+  @ViewBuilder
+  private func snippetDetailView(_ snippet: Snippet) -> some View {
+    let isDisabled = store.isAnyAncestorDisabled(snippet.groupPath)
+    HStack(spacing: 8) {
+      Image(systemName: snippet.isFavorite ? "star.fill" : "text.alignleft")
+        .foregroundStyle(snippet.isFavorite ? .yellow : .secondary)
+      Text(snippet.name)
+        .font(.title3.weight(.semibold))
+    }
+    if !snippet.description.isEmpty {
+      Text(snippet.description)
+        .font(.system(size: settings.fontSize))
+        .foregroundStyle(.secondary)
+    }
+    Text(groupLabel(snippet.groupPath))
+      .font(.system(size: settings.fontSize))
+      .foregroundStyle(.secondary)
+    if isDisabled {
+      Text("该 snippet 所在分组已禁用，仍可在管理页预览和编辑，但不会出现在悬浮窗搜索中。")
+        .font(.caption)
+        .foregroundStyle(.orange)
+    }
+
+    ScrollView {
+      renderPreviewText(snippet.body)
+        .font(.system(size: settings.fontSize, design: .monospaced))
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+    }
+    .background(Color(NSColor.textBackgroundColor))
+    .cornerRadius(8)
+  }
+
+  @ViewBuilder
+  private func groupDetailView(_ path: [String]) -> some View {
+    let isDisabled = store.isAnyAncestorDisabled(path)
+    let groupSnippets = store.snippets.filter { isPrefixPath(path, of: $0.groupPath) }
+    let directSnippets = store.snippets.filter { $0.groupPath == path }
+    let subgroupCount = store.groups.filter { isPrefixPath(path, of: $0) }.count - 1
+
+    Text(path.last ?? "分组")
+      .font(.title3.weight(.semibold))
+    Text(groupLabel(path))
+      .font(.system(size: settings.fontSize))
+      .foregroundStyle(.secondary)
+    if isDisabled {
+      Text("该分组已禁用，仍可在管理页预览和编辑，但不会出现在悬浮窗搜索中。")
+        .font(.caption)
+        .foregroundStyle(.orange)
+    }
+
+    VStack(alignment: .leading, spacing: 6) {
+      Text("本组 snippet: \(directSnippets.count)")
+      Text("包含子组共 snippet: \(groupSnippets.count)")
+      Text("子分组数量: \(max(0, subgroupCount))")
+    }
+    .font(.system(size: settings.fontSize))
+
+    if let firstSnippet = groupSnippets.first {
+      Divider()
+      Text("示例预览")
+        .font(.headline)
+      ScrollView {
+        renderPreviewText(firstSnippet.body)
+          .font(.system(size: settings.fontSize, design: .monospaced))
+          .textSelection(.enabled)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(10)
+      }
+      .background(Color(NSColor.textBackgroundColor))
+      .cornerRadius(8)
+    } else {
+      Spacer()
+      Text("该分组下暂无 snippet")
+        .foregroundStyle(.secondary)
+      Spacer()
     }
   }
 
   private var selectedSnippet: Snippet? {
-    guard let selectedSnippetID else { return nil }
-    return filteredSnippets.first(where: { $0.id == selectedSnippetID })
+    guard selectedSidebarSelection != .trash, let selectedItemID else { return nil }
+    return filteredSnippets.first(where: { $0.id == selectedItemID })
+  }
+
+  private var selectedTrashItem: TrashListItem? {
+    guard selectedSidebarSelection == .trash, let selectedItemID else { return nil }
+    return filteredTrashItems.first(where: { $0.id == selectedItemID })
   }
 
   private var selectedGroupPath: [String] {
-    if case let .group(path) = selectedGroupSelection { return path }
+    if case let .group(path) = selectedSidebarSelection { return path }
     return []
   }
 
   private var globalVisibleSnippetCount: Int {
     store.snippets.filter { !store.isAnyAncestorDisabled($0.groupPath) }.count
+  }
+
+  private var trashItemCount: Int {
+    store.trashSnippets.count + store.trashGroups.count
   }
 
   private var filteredSnippets: [Snippet] {
@@ -2199,8 +2766,48 @@ struct ContentView: View {
     .sorted(by: store.compareSnippets)
   }
 
+  private var filteredTrashItems: [TrashListItem] {
+    let q = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let snippets = store.trashSnippets.filter { entry in
+      if q.isEmpty { return true }
+      let text = [
+        entry.snippet.name,
+        entry.snippet.description,
+        entry.snippet.trigger,
+        entry.originalGroupPath.joined(separator: "/"),
+        entry.snippet.body,
+        stripComments(entry.snippet.body),
+      ].joined(separator: "\n").lowercased()
+      return text.contains(q)
+    }
+    .sorted(by: store.compareTrashSnippets)
+    .map(TrashListItem.snippet)
+
+    let groups = store.trashGroups.filter { entry in
+      if q.isEmpty { return true }
+      let text = [
+        entry.originalPath.joined(separator: "/"),
+        entry.snippets.map(\.name).joined(separator: "\n"),
+        entry.snippets.map(\.description).joined(separator: "\n"),
+      ].joined(separator: "\n").lowercased()
+      return text.contains(q)
+    }
+    .sorted(by: store.compareTrashGroups)
+    .map(TrashListItem.group)
+
+    return (snippets + groups).sorted(by: compareTrashItems)
+  }
+
+  private var normalItemIDs: [String] {
+    filteredSnippets.map(\.id)
+  }
+
+  private var trashItemIDs: [String] {
+    filteredTrashItems.map(\.id)
+  }
+
   private var groupTree: [GroupNode] {
-    return buildGroupTree(groups: store.groups, snippets: store.snippets)
+    buildGroupTree(groups: store.groups, snippets: store.snippets)
   }
 
   private func buildGroupTree(groups: [[String]], snippets: [Snippet]) -> [GroupNode] {
@@ -2255,17 +2862,85 @@ struct ContentView: View {
     return true
   }
 
-  private func moveSelection(step: Int) {
-    guard !filteredSnippets.isEmpty else { return }
+  private func compareTrashItems(_ lhs: TrashListItem, _ rhs: TrashListItem) -> Bool {
+    switch (lhs, rhs) {
+    case (.snippet(let left), .snippet(let right)):
+      return store.compareTrashSnippets(left, right)
+    case (.group(let left), .group(let right)):
+      return store.compareTrashGroups(left, right)
+    case (.snippet(let left), .group(let right)):
+      if left.deletedAt != right.deletedAt {
+        return left.deletedAt > right.deletedAt
+      }
+      return true
+    case (.group(let left), .snippet(let right)):
+      if left.deletedAt != right.deletedAt {
+        return left.deletedAt > right.deletedAt
+      }
+      return false
+    }
+  }
 
-    guard let currentID = selectedSnippetID,
-          let currentIdx = filteredSnippets.firstIndex(where: { $0.id == currentID }) else {
-      selectedSnippetID = filteredSnippets.first?.id
+  private func currentItemIDs() -> [String] {
+    selectedSidebarSelection == .trash ? trashItemIDs : normalItemIDs
+  }
+
+  private func selectFirstItemIfNeeded() {
+    let ids = currentItemIDs()
+    if let current = selectedItemID, ids.contains(current) { return }
+    selectedItemID = ids.first
+  }
+
+  private func selectFirstItem(force: Bool) {
+    if force {
+      selectedItemID = currentItemIDs().first
+      return
+    }
+    selectFirstItemIfNeeded()
+  }
+
+  private func restoreTrashItem(_ item: TrashListItem) {
+    switch item {
+    case .snippet(let entry):
+      store.restoreTrashSnippet(entry)
+    case .group(let entry):
+      store.restoreTrashGroup(entry)
+    }
+  }
+
+  private func permanentlyDeleteTrashItem(_ item: TrashListItem) {
+    switch item {
+    case .snippet(let entry):
+      store.permanentlyDeleteTrashSnippet(entry)
+    case .group(let entry):
+      store.permanentlyDeleteTrashGroup(entry)
+    }
+  }
+
+  private func trashDateLabel(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = .autoupdatingCurrent
+    formatter.timeZone = .autoupdatingCurrent
+    formatter.dateStyle = .short
+    formatter.timeStyle = .short
+    return formatter.string(from: date)
+  }
+
+  private func moveSelection(step: Int) {
+    let ids = currentItemIDs()
+    guard !ids.isEmpty else {
+      selectedItemID = nil
       return
     }
 
-    let next = max(0, min(filteredSnippets.count - 1, currentIdx + step))
-    selectedSnippetID = filteredSnippets[next].id
+    guard let currentID = selectedItemID,
+          let currentIdx = ids.firstIndex(of: currentID) else {
+      selectedItemID = ids.first
+      return
+    }
+
+    let next = max(0, min(ids.count - 1, currentIdx + step))
+    selectedItemID = ids[next]
   }
 }
 
@@ -2635,14 +3310,27 @@ final class ShortcutRecorderNSView: NSView {
 
 func confirmDeleteGroup(path: [String], snippetCount: Int, subgroupCount: Int) -> Bool {
   let alert = NSAlert()
-  alert.messageText = "删除分组？"
+  alert.messageText = "移到回收站？"
   alert.informativeText = """
   分组：\(path.joined(separator: " / "))
-  将删除 \(snippetCount) 条 snippet，\(subgroupCount) 个子分组。
+  将把 \(snippetCount) 条 snippet，\(subgroupCount) 个子分组移到回收站。
+  之后仍可从回收站恢复到原位置。
+  """
+  alert.alertStyle = .warning
+  alert.addButton(withTitle: "移到回收站")
+  alert.addButton(withTitle: "取消")
+  return alert.runModal() == .alertFirstButtonReturn
+}
+
+func confirmEmptyTrash(itemCount: Int) -> Bool {
+  let alert = NSAlert()
+  alert.messageText = "清空回收站？"
+  alert.informativeText = """
+  将永久删除回收站中的 \(itemCount) 项内容。
   此操作不可恢复。
   """
   alert.alertStyle = .warning
-  alert.addButton(withTitle: "删除")
+  alert.addButton(withTitle: "清空")
   alert.addButton(withTitle: "取消")
   return alert.runModal() == .alertFirstButtonReturn
 }
