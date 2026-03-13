@@ -1220,10 +1220,11 @@ final class QuickInsertController {
     }
     presentationID = UUID()
     let targetScreen = currentTargetScreen()
-    let targetFrame = savedPanelFrame() ?? WindowLayout.quickPanelFrame(
+    let defaultFrame = WindowLayout.quickPanelFrame(
       for: NSSize(width: 640, height: 460),
       screen: targetScreen
     )
+    let targetFrame = resolvedPanelFrame(for: targetScreen, fallback: defaultFrame)
 
     if panel == nil {
       let panel = QuickSearchPanel(
@@ -1273,11 +1274,10 @@ final class QuickInsertController {
       apply(panel: panel, frame: targetFrame)
       DispatchQueue.main.async { [weak self] in
         guard let self, let panel = self.panel else { return }
-        if let savedFrame = self.savedPanelFrame() {
-          self.apply(panel: panel, frame: savedFrame)
-        } else {
-          self.position(panel: panel, on: self.currentTargetScreen(for: panel))
-        }
+        let screen = self.currentTargetScreen(for: panel)
+        let fallback = WindowLayout.quickPanelFrame(for: panel.frame.size, screen: screen)
+        let resolvedFrame = self.resolvedPanelFrame(for: screen, fallback: fallback, size: panel.frame.size)
+        self.apply(panel: panel, frame: resolvedFrame)
       }
     }
   }
@@ -1296,6 +1296,39 @@ final class QuickInsertController {
 
   private func currentTargetScreen(for panel: NSPanel) -> NSScreen? {
     currentTargetScreen() ?? panel.screen ?? NSScreen.main
+  }
+
+  private func resolvedPanelFrame(
+    for screen: NSScreen?,
+    fallback: NSRect,
+    size: NSSize = NSSize(width: 640, height: 460)
+  ) -> NSRect {
+    guard let savedFrame = savedPanelFrame() else { return fallback }
+    guard let sourceScreen = screenContaining(frame: savedFrame) else {
+      return WindowLayout.clampedFrame(savedFrame, on: screen, fallbackOrigin: fallback.origin)
+    }
+    guard let screen else {
+      return WindowLayout.clampedFrame(savedFrame, on: sourceScreen, fallbackOrigin: fallback.origin)
+    }
+
+    let translatedFrame = WindowLayout.translatedFrame(
+      savedFrame,
+      from: sourceScreen,
+      to: screen,
+      fallbackSize: size
+    )
+    return WindowLayout.clampedFrame(translatedFrame, on: screen, fallbackOrigin: fallback.origin)
+  }
+
+  private func screenContaining(frame: NSRect) -> NSScreen? {
+    let frameCenter = NSPoint(x: frame.midX, y: frame.midY)
+    if let screen = NSScreen.screens.first(where: { $0.frame.contains(frameCenter) }) {
+      return screen
+    }
+
+    return NSScreen.screens.max { lhs, rhs in
+      lhs.frame.intersection(frame).area < rhs.frame.intersection(frame).area
+    }
   }
 
   private func position(panel: NSPanel, on screen: NSScreen?) {
@@ -1562,6 +1595,58 @@ enum WindowLayout {
     let x = visibleFrame.midX - (size.width / 2)
     let y = visibleFrame.maxY - size.height - floor(visibleFrame.height * quickPanelTopInsetRatio)
     return NSRect(x: x, y: y, width: size.width, height: size.height)
+  }
+
+  static func translatedFrame(
+    _ frame: NSRect,
+    from sourceScreen: NSScreen,
+    to targetScreen: NSScreen,
+    fallbackSize: NSSize
+  ) -> NSRect {
+    let sourceVisibleFrame = sourceScreen.visibleFrame
+    let targetVisibleFrame = targetScreen.visibleFrame
+    let size = NSSize(
+      width: min(frame.width, targetVisibleFrame.width),
+      height: min(frame.height, targetVisibleFrame.height)
+    )
+    let safeSize = NSSize(
+      width: size.width > 0 ? size.width : fallbackSize.width,
+      height: size.height > 0 ? size.height : fallbackSize.height
+    )
+
+    let relativeX = sourceVisibleFrame.width > frame.width
+      ? (frame.minX - sourceVisibleFrame.minX) / (sourceVisibleFrame.width - frame.width)
+      : 0.5
+    let relativeY = sourceVisibleFrame.height > frame.height
+      ? (frame.minY - sourceVisibleFrame.minY) / (sourceVisibleFrame.height - frame.height)
+      : 0.5
+
+    let clampedRelativeX = min(max(relativeX, 0), 1)
+    let clampedRelativeY = min(max(relativeY, 0), 1)
+    let x = targetVisibleFrame.minX + (targetVisibleFrame.width - safeSize.width) * clampedRelativeX
+    let y = targetVisibleFrame.minY + (targetVisibleFrame.height - safeSize.height) * clampedRelativeY
+    return NSRect(x: x, y: y, width: safeSize.width, height: safeSize.height)
+  }
+
+  static func clampedFrame(_ frame: NSRect, on screen: NSScreen?, fallbackOrigin: NSPoint) -> NSRect {
+    guard let screen else { return frame }
+    let visibleFrame = screen.visibleFrame
+    let width = min(frame.width, visibleFrame.width)
+    let height = min(frame.height, visibleFrame.height)
+    let minX = visibleFrame.minX
+    let maxX = visibleFrame.maxX - width
+    let minY = visibleFrame.minY
+    let maxY = visibleFrame.maxY - height
+    let x = min(max(frame.minX, minX), maxX.isFinite ? maxX : fallbackOrigin.x)
+    let y = min(max(frame.minY, minY), maxY.isFinite ? maxY : fallbackOrigin.y)
+    return NSRect(x: x, y: y, width: width, height: height)
+  }
+}
+
+private extension NSRect {
+  var area: CGFloat {
+    guard !isNull, !isEmpty else { return 0 }
+    return width * height
   }
 }
 
