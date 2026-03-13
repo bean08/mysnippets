@@ -19,7 +19,7 @@ target/
 *.launch
 
 ## system files
-.Ds_store
+.DS_Store
 *._*
 
 ### NetBeans ###
@@ -30,4 +30,4 @@ dist/
 nbdist/
 
 # Swift build artifacts
-mysnippets/.build/
+.build/
