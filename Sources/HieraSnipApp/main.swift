@@ -2390,6 +2390,8 @@ struct ContentView: View {
         OutlineGroup(groupTree, children: \.children) { node in
           let isDisabled = store.isAnyAncestorDisabled(node.path)
           HStack(spacing: 6) {
+            Image(systemName: "folder")
+              .foregroundStyle(isDisabled ? .tertiary : .secondary)
             Text(node.name)
               .font(.system(size: settings.fontSize))
               .lineLimit(1)
@@ -2771,8 +2773,12 @@ struct ContentView: View {
     let directSnippets = store.snippets.filter { $0.groupPath == path }
     let subgroupCount = store.groups.filter { isPrefixPath(path, of: $0) }.count - 1
 
-    Text(path.last ?? "分组")
-      .font(.title3.weight(.semibold))
+    HStack(spacing: 8) {
+      Image(systemName: "folder")
+        .foregroundStyle(.secondary)
+      Text(path.last ?? "分组")
+        .font(.title3.weight(.semibold))
+    }
     Text(groupLabel(path))
       .font(.system(size: settings.fontSize))
       .foregroundStyle(.secondary)
@@ -2920,7 +2926,16 @@ struct ContentView: View {
     func build(path: [String]) -> [GroupNode] {
       let pathKey = path.joined(separator: "/")
       let names = Array(childrenByPath[pathKey] ?? [])
-        .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        .sorted { lhs, rhs in
+          let lhsPath = path + [lhs]
+          let rhsPath = path + [rhs]
+          let lhsDisabled = store.isAnyAncestorDisabled(lhsPath)
+          let rhsDisabled = store.isAnyAncestorDisabled(rhsPath)
+          if lhsDisabled != rhsDisabled {
+            return !lhsDisabled && rhsDisabled
+          }
+          return lhs.localizedStandardCompare(rhs) == .orderedAscending
+        }
 
       return names.map { name in
         let nextPath = path + [name]

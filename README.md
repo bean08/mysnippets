@@ -85,8 +85,11 @@ Storage schema:
 
 ## Release
 
-- Current version: `0.0.2` (from [`VERSION`](VERSION))
-- Recommended Git tag: `v0.0.2`
+- Current version: `0.0.3` (from [`VERSION`](VERSION))
+- Recommended Git tag: `v0.0.3`
+- Latest changes in `v0.0.3`:
+  - Added folder icons to main-window group rows and group detail headers
+  - Disabled groups now sort after enabled groups in the sidebar
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
 
 ## License

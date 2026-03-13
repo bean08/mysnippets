@@ -31,3 +31,10 @@ The format is based on Keep a Changelog, and this project uses Semantic Versioni
 - Main window default size now scales relative to the current screen
 - Quick insert panel now closes on blur and remembers user-dragged position
 - Settings UI now uses compact dropdowns for font size and row height
+
+## [0.0.3] - 2026-03-13
+
+### Changed
+- Main window group rows now show folder icons to match the quick insert panel
+- Group detail headers now show a folder icon in the main window
+- Disabled groups now sort after enabled groups within the same sidebar level

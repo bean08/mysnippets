@@ -86,8 +86,11 @@ cd mysnippets
 
 ## 发布
 
-- 当前版本：`0.0.2`（来自 [`VERSION`](VERSION)）
-- 推荐 Git tag：`v0.0.2`
+- 当前版本：`0.0.3`（来自 [`VERSION`](VERSION)）
+- 推荐 Git tag：`v0.0.3`
+- `v0.0.3` 最新变更：
+  - 主窗口分组列表和分组详情补充了文件夹图标
+  - 侧边栏中禁用分组会自动排到启用分组之后
 - 变更记录见：[CHANGELOG.md](CHANGELOG.md)
 
 ## 许可证
