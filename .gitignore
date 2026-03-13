@@ -1,0 +1,33 @@
+target/
+/logs/
+*.log
+!.mvn/wrapper/maven-wrapper.jar
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+*.launch
+
+## system files
+.Ds_store
+*._*
+
+### NetBeans ###
+nbproject/private/
+build/
+nbbuild/
+dist/
+nbdist/
+
+# Swift build artifacts
+mysnippets/.build/
