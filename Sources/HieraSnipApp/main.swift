@@ -3,6 +3,7 @@ import ApplicationServices
 import Carbon.HIToolbox
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct Snippet: Identifiable, Codable, Hashable {
   var id: String
@@ -21,6 +22,13 @@ struct GroupNode: Identifiable, Hashable {
   let directCount: Int
   let totalCount: Int
   var children: [GroupNode]?
+}
+
+struct FlatGroupNode: Identifiable, Hashable {
+  let node: GroupNode
+  let depth: Int
+
+  var id: String { node.id }
 }
 
 struct GroupCreateTarget: Identifiable {
@@ -72,6 +80,8 @@ final class SnippetStore: ObservableObject {
   private var legacyGroupsRootURL: URL
   private var legacyDisabledGroupsFileURL: URL
   private var groupIDByPathKey: [String: String] = [:]
+  private var groupOrderByPathKey: [String: Int] = [:]
+  private var snippetOrderByID: [String: Int] = [:]
   private var timer: Timer?
   private var lastFingerprint: String = ""
 
@@ -109,6 +119,8 @@ final class SnippetStore: ObservableObject {
     legacyGroupsRootURL = storageRootURL.appendingPathComponent("groups", isDirectory: true)
     legacyDisabledGroupsFileURL = storageRootURL.appendingPathComponent("disabled-groups.json", isDirectory: false)
     groupIDByPathKey = [:]
+    groupOrderByPathKey = [:]
+    snippetOrderByID = [:]
     bootstrapIfNeeded()
     reload()
   }
@@ -127,17 +139,21 @@ final class SnippetStore: ObservableObject {
       trashSnippets = []
       trashGroups = []
       groupIDByPathKey = [:]
+      groupOrderByPathKey = [:]
+      snippetOrderByID = [:]
       lastFingerprint = fingerprint()
       return
     }
 
     let loaded = decodeDiskStore(disk)
+    groupIDByPathKey = loaded.groupIDByPathKey
+    groupOrderByPathKey = loaded.groupOrderByPathKey
+    snippetOrderByID = loaded.snippetOrderByID
     snippets = loaded.snippets.sorted(by: compareSnippets)
     groups = loaded.groups.sorted(by: comparePath)
     disabledGroupKeys = loaded.disabledKeys
     trashSnippets = loaded.trashSnippets.sorted(by: compareTrashSnippets)
     trashGroups = loaded.trashGroups.sorted(by: compareTrashGroups)
-    groupIDByPathKey = loaded.groupIDByPathKey
     lastFingerprint = fingerprint()
   }
 
@@ -146,12 +162,74 @@ final class SnippetStore: ObservableObject {
     var normalized = snippet
     normalized.groupPath = normalizeGroupPath(snippet.groupPath)
     if let idx = next.firstIndex(where: { $0.id == normalized.id }) {
-      next[idx] = normalized
+      let previousGroupPath = next[idx].groupPath
+      next.remove(at: idx)
+      if previousGroupPath == normalized.groupPath {
+        let insertionIndex = max(0, min(idx, next.count))
+        next.insert(normalized, at: insertionIndex)
+      } else {
+        insertSnippet(normalized, into: &next)
+      }
     } else {
-      next.append(normalized)
+      insertSnippet(normalized, into: &next)
     }
     persist(snippets: next, groups: groups, disabledKeys: disabledGroupKeys, trashSnippets: trashSnippets, trashGroups: trashGroups)
-    reload()
+    applyCurrentState(snippets: next, groups: groups, disabledKeys: disabledGroupKeys, trashSnippets: trashSnippets, trashGroups: trashGroups)
+  }
+
+  func moveSnippets(in groupPath: [String], from source: IndexSet, to destination: Int) {
+    let normalized = normalizeGroupPath(groupPath)
+    let groupSnippets = snippets.filter { $0.groupPath == normalized }
+    guard !groupSnippets.isEmpty else { return }
+
+    var movedGroupSnippets = groupSnippets
+    movedGroupSnippets.move(fromOffsets: source, toOffset: destination)
+    var iterator = movedGroupSnippets.makeIterator()
+    let nextSnippets = snippets.map { snippet in
+      guard snippet.groupPath == normalized else { return snippet }
+      return iterator.next() ?? snippet
+    }
+
+    persist(
+      snippets: nextSnippets,
+      groups: groups,
+      disabledKeys: disabledGroupKeys,
+      trashSnippets: trashSnippets,
+      trashGroups: trashGroups
+    )
+    applyCurrentState(snippets: nextSnippets, groups: groups, disabledKeys: disabledGroupKeys, trashSnippets: trashSnippets, trashGroups: trashGroups)
+  }
+
+  func moveGroups(in parentPath: [String], from source: IndexSet, to destination: Int) {
+    let normalizedParent = normalizeParentPath(parentPath)
+    var siblings = directChildGroups(of: normalizedParent)
+    guard !siblings.isEmpty else { return }
+
+    siblings.move(fromOffsets: source, toOffset: destination)
+    var childrenByParent: [String: [[String]]] = [:]
+    for path in groups {
+      childrenByParent[pathKey(Array(path.dropLast())), default: []].append(path)
+    }
+    childrenByParent[pathKey(normalizedParent)] = siblings
+
+    persist(
+      snippets: snippets,
+      groups: flattenGroupTree(childrenByParent: childrenByParent),
+      disabledKeys: disabledGroupKeys,
+      trashSnippets: trashSnippets,
+      trashGroups: trashGroups
+    )
+    applyCurrentState(
+      snippets: snippets,
+      groups: flattenGroupTree(childrenByParent: childrenByParent),
+      disabledKeys: disabledGroupKeys,
+      trashSnippets: trashSnippets,
+      trashGroups: trashGroups
+    )
+  }
+
+  func compareGroups(_ lhs: [String], _ rhs: [String]) -> Bool {
+    comparePath(lhs, rhs)
   }
 
   func remove(_ snippet: Snippet) {
@@ -177,23 +255,21 @@ final class SnippetStore: ObservableObject {
     var next = snippets
     next[idx].isFavorite.toggle()
     persist(snippets: next, groups: groups, disabledKeys: disabledGroupKeys, trashSnippets: trashSnippets, trashGroups: trashGroups)
-    reload()
+    applyCurrentState(snippets: next, groups: groups, disabledKeys: disabledGroupKeys, trashSnippets: trashSnippets, trashGroups: trashGroups)
   }
 
   func createGroup(_ path: [String]) {
     let normalized = normalizeGroupPath(path)
-    var nextGroups = Set(groups.map(pathKey))
-    for depth in 0..<normalized.count {
-      nextGroups.insert(pathKey(Array(normalized.prefix(depth + 1))))
-    }
+    var nextGroups = groups
+    appendGroupPath(normalized, to: &nextGroups)
     persist(
       snippets: snippets,
-      groups: nextGroups.map(keyToPath),
+      groups: nextGroups,
       disabledKeys: disabledGroupKeys,
       trashSnippets: trashSnippets,
       trashGroups: trashGroups
     )
-    reload()
+    applyCurrentState(snippets: snippets, groups: nextGroups, disabledKeys: disabledGroupKeys, trashSnippets: trashSnippets, trashGroups: trashGroups)
   }
 
   func disableGroup(_ path: [String]) {
@@ -201,7 +277,7 @@ final class SnippetStore: ObservableObject {
     var next = disabledGroupKeys
     next.insert(key)
     persist(snippets: snippets, groups: groups, disabledKeys: next, trashSnippets: trashSnippets, trashGroups: trashGroups)
-    disabledGroupKeys = next
+    applyCurrentState(snippets: snippets, groups: groups, disabledKeys: next, trashSnippets: trashSnippets, trashGroups: trashGroups)
   }
 
   func enableGroup(_ path: [String]) {
@@ -209,7 +285,7 @@ final class SnippetStore: ObservableObject {
     var next = disabledGroupKeys
     next.remove(key)
     persist(snippets: snippets, groups: groups, disabledKeys: next, trashSnippets: trashSnippets, trashGroups: trashGroups)
-    disabledGroupKeys = next
+    applyCurrentState(snippets: snippets, groups: groups, disabledKeys: next, trashSnippets: trashSnippets, trashGroups: trashGroups)
   }
 
   func isGroupDisabled(_ path: [String]) -> Bool {
@@ -274,7 +350,7 @@ final class SnippetStore: ObservableObject {
       trashSnippets: trashSnippets,
       trashGroups: trashGroups
     )
-    reload()
+    applyCurrentState(snippets: nextSnippets, groups: nextGroups, disabledKeys: nextDisabled, trashSnippets: trashSnippets, trashGroups: trashGroups)
   }
 
   func deleteGroup(_ path: [String]) {
@@ -301,8 +377,7 @@ final class SnippetStore: ObservableObject {
       trashSnippets: trashSnippets,
       trashGroups: trashGroups + [entry]
     )
-    disabledGroupKeys = nextDisabled
-    reload()
+    applyCurrentState(snippets: nextSnippets, groups: nextGroups, disabledKeys: nextDisabled, trashSnippets: trashSnippets, trashGroups: trashGroups + [entry])
   }
 
   func restoreTrashSnippet(_ entry: TrashSnippetEntry) {
@@ -313,7 +388,7 @@ final class SnippetStore: ObservableObject {
     if nextSnippets.contains(where: { $0.id == restored.id }) {
       restored.id = UUID().uuidString
     }
-    nextSnippets.append(restored)
+    insertSnippet(restored, into: &nextSnippets)
     var nextTrashSnippets = trashSnippets
     nextTrashSnippets.remove(at: index)
     persist(
@@ -323,18 +398,16 @@ final class SnippetStore: ObservableObject {
       trashSnippets: nextTrashSnippets,
       trashGroups: trashGroups
     )
-    reload()
+    applyCurrentState(snippets: nextSnippets, groups: groups, disabledKeys: disabledGroupKeys, trashSnippets: nextTrashSnippets, trashGroups: trashGroups)
   }
 
   func restoreTrashGroup(_ entry: TrashGroupEntry) {
     guard let index = trashGroups.firstIndex(where: { $0.id == entry.id }) else { return }
 
-    var nextGroups = Set(groups.map(pathKey))
+    var nextGroups = groups
     var nextDisabled = disabledGroupKeys
     for snapshot in entry.groups.sorted(by: { $0.path.count < $1.path.count }) {
-      for depth in 0..<snapshot.path.count {
-        nextGroups.insert(pathKey(Array(snapshot.path.prefix(depth + 1))))
-      }
+      appendGroupPath(snapshot.path, to: &nextGroups)
       if snapshot.isHidden {
         nextDisabled.insert(pathKey(snapshot.path))
       } else {
@@ -349,19 +422,19 @@ final class SnippetStore: ObservableObject {
       if nextSnippets.contains(where: { $0.id == restored.id }) {
         restored.id = UUID().uuidString
       }
-      nextSnippets.append(restored)
+      insertSnippet(restored, into: &nextSnippets)
     }
 
     var nextTrashGroups = trashGroups
     nextTrashGroups.remove(at: index)
     persist(
       snippets: nextSnippets,
-      groups: nextGroups.map(keyToPath),
+      groups: nextGroups,
       disabledKeys: nextDisabled,
       trashSnippets: trashSnippets,
       trashGroups: nextTrashGroups
     )
-    reload()
+    applyCurrentState(snippets: nextSnippets, groups: nextGroups, disabledKeys: nextDisabled, trashSnippets: trashSnippets, trashGroups: nextTrashGroups)
   }
 
   func permanentlyDeleteTrashSnippet(_ entry: TrashSnippetEntry) {
@@ -373,7 +446,7 @@ final class SnippetStore: ObservableObject {
       trashSnippets: nextTrashSnippets,
       trashGroups: trashGroups
     )
-    reload()
+    applyCurrentState(snippets: snippets, groups: groups, disabledKeys: disabledGroupKeys, trashSnippets: nextTrashSnippets, trashGroups: trashGroups)
   }
 
   func permanentlyDeleteTrashGroup(_ entry: TrashGroupEntry) {
@@ -385,7 +458,7 @@ final class SnippetStore: ObservableObject {
       trashSnippets: trashSnippets,
       trashGroups: nextTrashGroups
     )
-    reload()
+    applyCurrentState(snippets: snippets, groups: groups, disabledKeys: disabledGroupKeys, trashSnippets: trashSnippets, trashGroups: nextTrashGroups)
   }
 
   func emptyTrash() {
@@ -396,7 +469,7 @@ final class SnippetStore: ObservableObject {
       trashSnippets: [],
       trashGroups: []
     )
-    reload()
+    applyCurrentState(snippets: snippets, groups: groups, disabledKeys: disabledGroupKeys, trashSnippets: [], trashGroups: [])
   }
 
   private func bootstrapIfNeeded() {
@@ -483,14 +556,14 @@ final class SnippetStore: ObservableObject {
   }
 
   func compareSnippets(_ lhs: Snippet, _ rhs: Snippet) -> Bool {
-    if lhs.isFavorite != rhs.isFavorite {
-      return lhs.isFavorite && !rhs.isFavorite
+    if lhs.groupPath != rhs.groupPath {
+      return comparePath(lhs.groupPath, rhs.groupPath)
     }
 
-    let g1 = pathKey(lhs.groupPath)
-    let g2 = pathKey(rhs.groupPath)
-    if g1 != g2 {
-      return g1.localizedStandardCompare(g2) == .orderedAscending
+    let lhsOrder = snippetOrderByID[lhs.id] ?? Int.max
+    let rhsOrder = snippetOrderByID[rhs.id] ?? Int.max
+    if lhsOrder != rhsOrder {
+      return lhsOrder < rhsOrder
     }
 
     let nameOrder = lhs.name.localizedStandardCompare(rhs.name)
@@ -538,7 +611,22 @@ final class SnippetStore: ObservableObject {
   }
 
   private func comparePath(_ a: [String], _ b: [String]) -> Bool {
-    a.joined(separator: "/").localizedStandardCompare(b.joined(separator: "/")) == .orderedAscending
+    if a == b { return false }
+
+    let limit = min(a.count, b.count)
+    for idx in 0..<limit {
+      if a[idx] == b[idx] { continue }
+      let lhsPath = Array(a.prefix(idx + 1))
+      let rhsPath = Array(b.prefix(idx + 1))
+      let lhsOrder = groupOrderByPathKey[pathKey(lhsPath)] ?? Int.max
+      let rhsOrder = groupOrderByPathKey[pathKey(rhsPath)] ?? Int.max
+      if lhsOrder != rhsOrder {
+        return lhsOrder < rhsOrder
+      }
+      return a[idx].localizedStandardCompare(b[idx]) == .orderedAscending
+    }
+
+    return a.count < b.count
   }
 
   private func listLegacySnippetFiles() -> [URL] {
@@ -635,6 +723,69 @@ final class SnippetStore: ObservableObject {
     )
   }
 
+  private func orderedGroupPaths(from groups: [[String]], snippets: [Snippet]) -> [[String]] {
+    var ordered: [[String]] = []
+    for path in groups {
+      appendGroupPath(normalizeGroupPath(path), to: &ordered)
+    }
+    for snippet in snippets {
+      appendGroupPath(snippet.groupPath, to: &ordered)
+    }
+    return ordered
+  }
+
+  private func appendGroupPath(_ path: [String], to groups: inout [[String]]) {
+    for depth in 0..<path.count {
+      let ancestor = Array(path.prefix(depth + 1))
+      if !groups.contains(ancestor) {
+        groups.append(ancestor)
+      }
+    }
+  }
+
+  private func insertSnippet(_ snippet: Snippet, into snippets: inout [Snippet]) {
+    if let lastIndexInGroup = snippets.lastIndex(where: { $0.groupPath == snippet.groupPath }) {
+      snippets.insert(snippet, at: lastIndexInGroup + 1)
+    } else {
+      snippets.append(snippet)
+    }
+  }
+
+  private func normalizeParentPath(_ path: [String]) -> [String] {
+    path.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+  }
+
+  private func directChildGroups(of parentPath: [String]) -> [[String]] {
+    groups.filter { path in
+      path.count == parentPath.count + 1 && Array(path.dropLast()) == parentPath
+    }
+  }
+
+  private func flattenGroupTree(childrenByParent: [String: [[String]]], parentPath: [String] = []) -> [[String]] {
+    let parentKey = pathKey(parentPath)
+    var result: [[String]] = []
+    for child in childrenByParent[parentKey] ?? [] {
+      result.append(child)
+      result.append(contentsOf: flattenGroupTree(childrenByParent: childrenByParent, parentPath: child))
+    }
+    return result
+  }
+
+  private func applyCurrentState(
+    snippets: [Snippet],
+    groups: [[String]],
+    disabledKeys: Set<String>,
+    trashSnippets: [TrashSnippetEntry],
+    trashGroups: [TrashGroupEntry]
+  ) {
+    self.snippets = snippets.sorted(by: compareSnippets)
+    self.groups = groups.sorted(by: comparePath)
+    self.disabledGroupKeys = disabledKeys
+    self.trashSnippets = trashSnippets.sorted(by: compareTrashSnippets)
+    self.trashGroups = trashGroups.sorted(by: compareTrashGroups)
+    lastFingerprint = fingerprint()
+  }
+
   private func persist(
     snippets: [Snippet],
     groups: [[String]],
@@ -647,15 +798,7 @@ final class SnippetStore: ObservableObject {
       next.groupPath = normalizeGroupPath(snippet.groupPath)
       return next
     }
-
-    var groupSet = Set(groups.map(pathKey))
-    for snippet in normalizedSnippets {
-      for depth in 0..<snippet.groupPath.count {
-        groupSet.insert(pathKey(Array(snippet.groupPath.prefix(depth + 1))))
-      }
-    }
-
-    let orderedGroups = groupSet.map(keyToPath).sorted(by: comparePath)
+    let orderedGroups = orderedGroupPaths(from: groups, snippets: normalizedSnippets)
     var nextGroupIDByPathKey: [String: String] = [:]
     for path in orderedGroups {
       let key = pathKey(path)
@@ -664,12 +807,14 @@ final class SnippetStore: ObservableObject {
 
     var nextGroupOrderByParent: [String: Int] = [:]
     var diskGroups: [DiskGroup] = []
+    var nextGroupOrderByPathKey: [String: Int] = [:]
     for path in orderedGroups {
       guard let id = nextGroupIDByPathKey[pathKey(path)], let name = path.last else { continue }
       let parent = Array(path.dropLast())
       let parentKey = pathKey(parent)
       let order = nextGroupOrderByParent[parentKey, default: 0]
       nextGroupOrderByParent[parentKey] = order + 1
+      nextGroupOrderByPathKey[pathKey(path)] = order
       diskGroups.append(DiskGroup(
         id: id,
         name: name,
@@ -679,15 +824,15 @@ final class SnippetStore: ObservableObject {
       ))
     }
 
-    let sortedSnippets = normalizedSnippets.sorted(by: compareSnippets)
-
     var nextSnippetOrderByGroupID: [String: Int] = [:]
     var diskSnippets: [DiskSnippet] = []
-    for snippet in sortedSnippets {
+    var nextSnippetOrderByID: [String: Int] = [:]
+    for snippet in normalizedSnippets {
       let key = pathKey(snippet.groupPath)
       guard let groupID = nextGroupIDByPathKey[key] else { continue }
       let order = nextSnippetOrderByGroupID[groupID, default: 0]
       nextSnippetOrderByGroupID[groupID] = order + 1
+      nextSnippetOrderByID[snippet.id] = order
       diskSnippets.append(DiskSnippet(
         id: snippet.id,
         name: snippet.name,
@@ -748,47 +893,57 @@ final class SnippetStore: ObservableObject {
     guard let data = try? encoder.encode(disk) else { return }
     try? data.write(to: storageFileURL, options: .atomic)
     groupIDByPathKey = nextGroupIDByPathKey
+    groupOrderByPathKey = nextGroupOrderByPathKey
+    snippetOrderByID = nextSnippetOrderByID
+    lastFingerprint = fingerprint()
   }
 
-  private func decodeDiskStore(_ disk: DiskStore) -> (snippets: [Snippet], groups: [[String]], disabledKeys: Set<String>, trashSnippets: [TrashSnippetEntry], trashGroups: [TrashGroupEntry], groupIDByPathKey: [String: String]) {
-    let groupByID = Dictionary(uniqueKeysWithValues: disk.groups.map { ($0.id, $0) })
-    var pathCache: [String: [String]] = [:]
-
-    func resolvePath(_ id: String, visiting: Set<String> = []) -> [String]? {
-      if let cached = pathCache[id] { return cached }
-      if visiting.contains(id) { return nil }
-      guard let group = groupByID[id] else { return nil }
-
-      let path: [String]
-      if let parentID = group.parentID {
-        guard let parentPath = resolvePath(parentID, visiting: visiting.union([id])) else { return nil }
-        path = normalizeGroupPath(parentPath + [group.name])
-      } else {
-        path = normalizeGroupPath([group.name])
-      }
-      pathCache[id] = path
-      return path
+  private func decodeDiskStore(_ disk: DiskStore) -> (snippets: [Snippet], groups: [[String]], disabledKeys: Set<String>, trashSnippets: [TrashSnippetEntry], trashGroups: [TrashGroupEntry], groupIDByPathKey: [String: String], groupOrderByPathKey: [String: Int], snippetOrderByID: [String: Int]) {
+    let rootGroupID = "__root__"
+    var childrenByParentID: [String: [DiskGroup]] = [:]
+    for group in disk.groups {
+      childrenByParentID[group.parentID ?? rootGroupID, default: []].append(group)
     }
 
-    var loadedGroups = Set<String>()
+    var resolvedPathByGroupID: [String: [String]] = [:]
+    var loadedGroups: [[String]] = []
     var loadedDisabledKeys = Set<String>()
     var loadedGroupIDByPathKey: [String: String] = [:]
-    for group in disk.groups {
-      guard let path = resolvePath(group.id) else { continue }
-      let key = pathKey(path)
-      loadedGroups.insert(key)
-      loadedGroupIDByPathKey[key] = group.id
-      if group.hidden {
-        loadedDisabledKeys.insert(key)
+    var loadedGroupOrderByPathKey: [String: Int] = [:]
+
+    func visitGroups(parentID: String, parentPath: [String]) {
+      let children = (childrenByParentID[parentID] ?? []).sorted { lhs, rhs in
+        if lhs.order != rhs.order {
+          return lhs.order < rhs.order
+        }
+        return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+      }
+      for child in children {
+        let path = normalizeGroupPath(parentPath + [child.name])
+        let key = pathKey(path)
+        loadedGroups.append(path)
+        resolvedPathByGroupID[child.id] = path
+        loadedGroupIDByPathKey[key] = child.id
+        loadedGroupOrderByPathKey[key] = child.order
+        if child.hidden {
+          loadedDisabledKeys.insert(key)
+        }
+        visitGroups(parentID: child.id, parentPath: path)
       }
     }
+    visitGroups(parentID: rootGroupID, parentPath: [])
 
     var loadedSnippets: [Snippet] = []
+    var loadedSnippetOrderByID: [String: Int] = [:]
     for snippet in disk.snippets {
-      let path = resolvePath(snippet.groupID) ?? ["未分组"]
+      let path = resolvedPathByGroupID[snippet.groupID] ?? ["未分组"]
       for depth in 0..<path.count {
-        loadedGroups.insert(pathKey(Array(path.prefix(depth + 1))))
+        let ancestor = Array(path.prefix(depth + 1))
+        if !loadedGroups.contains(ancestor) {
+          loadedGroups.append(ancestor)
+        }
       }
+      loadedSnippetOrderByID[snippet.id] = snippet.order
       loadedSnippets.append(Snippet(
         id: snippet.id,
         name: snippet.name,
@@ -844,11 +999,13 @@ final class SnippetStore: ObservableObject {
 
     return (
       snippets: loadedSnippets,
-      groups: loadedGroups.map(keyToPath),
+      groups: loadedGroups,
       disabledKeys: loadedDisabledKeys,
       trashSnippets: loadedTrashSnippets,
       trashGroups: loadedTrashGroups,
-      groupIDByPathKey: loadedGroupIDByPathKey
+      groupIDByPathKey: loadedGroupIDByPathKey,
+      groupOrderByPathKey: loadedGroupOrderByPathKey,
+      snippetOrderByID: loadedSnippetOrderByID
     )
   }
 
@@ -1220,25 +1377,33 @@ final class QuickInsertController {
     }
     presentationID = UUID()
     let targetScreen = currentTargetScreen()
-    let defaultFrame = WindowLayout.quickPanelFrame(
-      for: NSSize(width: 640, height: 460),
-      screen: targetScreen
-    )
+    let defaultFrame = WindowLayout.quickPanelFrame(for: WindowLayout.quickPanelDefaultSize, screen: targetScreen)
     let targetFrame = resolvedPanelFrame(for: targetScreen, fallback: defaultFrame)
 
     if panel == nil {
       let panel = QuickSearchPanel(
         contentRect: targetFrame,
-        styleMask: [.titled, .closable],
+        styleMask: [.titled, .closable, .fullSizeContentView],
         backing: .buffered,
         defer: false
       )
       panel.title = "快速搜索 Snippet"
       panel.level = .floating
+      panel.titleVisibility = .hidden
+      panel.titlebarAppearsTransparent = true
+      panel.isOpaque = false
+      panel.backgroundColor = .clear
+      panel.appearance = NSAppearance(named: .aqua)
+      panel.hasShadow = true
+      panel.isMovableByWindowBackground = true
+      panel.minSize = WindowLayout.quickPanelMinimumSize
       panel.isReleasedWhenClosed = false
       panel.hidesOnDeactivate = false
       panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
       panel.isFloatingPanel = true
+      panel.standardWindowButton(.closeButton)?.isHidden = true
+      panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+      panel.standardWindowButton(.zoomButton)?.isHidden = true
       panel.onResignKey = { [weak self] in
         self?.hide()
       }
@@ -1301,18 +1466,24 @@ final class QuickInsertController {
   private func resolvedPanelFrame(
     for screen: NSScreen?,
     fallback: NSRect,
-    size: NSSize = NSSize(width: 640, height: 460)
+    size: NSSize = WindowLayout.quickPanelDefaultSize
   ) -> NSRect {
     guard let savedFrame = savedPanelFrame() else { return fallback }
-    guard let sourceScreen = screenContaining(frame: savedFrame) else {
-      return WindowLayout.clampedFrame(savedFrame, on: screen, fallbackOrigin: fallback.origin)
+    let normalizedSavedFrame = NSRect(
+      x: savedFrame.minX,
+      y: savedFrame.minY,
+      width: max(savedFrame.width, WindowLayout.quickPanelMinimumSize.width),
+      height: max(savedFrame.height, WindowLayout.quickPanelMinimumSize.height)
+    )
+    guard let sourceScreen = screenContaining(frame: normalizedSavedFrame) else {
+      return WindowLayout.clampedFrame(normalizedSavedFrame, on: screen, fallbackOrigin: fallback.origin)
     }
     guard let screen else {
-      return WindowLayout.clampedFrame(savedFrame, on: sourceScreen, fallbackOrigin: fallback.origin)
+      return WindowLayout.clampedFrame(normalizedSavedFrame, on: sourceScreen, fallbackOrigin: fallback.origin)
     }
 
     let translatedFrame = WindowLayout.translatedFrame(
-      savedFrame,
+      normalizedSavedFrame,
       from: sourceScreen,
       to: screen,
       fallbackSize: size
@@ -1571,6 +1742,8 @@ enum WindowLayout {
   static let mainWindowWidthRatio: CGFloat = 0.744
   static let mainWindowHeightRatio: CGFloat = 0.82
   static let quickPanelTopInsetRatio: CGFloat = 0.20
+  static let quickPanelMinimumSize = NSSize(width: 820, height: 500)
+  static let quickPanelDefaultSize = NSSize(width: 860, height: 500)
 
   static func defaultMainWindowSize(for screen: NSScreen? = NSScreen.main) -> NSSize {
     let visibleFrame = (screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -1669,6 +1842,25 @@ struct WindowAccessor: NSViewRepresentable {
         onResolve(window)
       }
     }
+  }
+}
+
+struct VisualEffectView: NSViewRepresentable {
+  var material: NSVisualEffectView.Material
+  var blendingMode: NSVisualEffectView.BlendingMode
+  var emphasized: Bool = false
+
+  func makeNSView(context: Context) -> NSVisualEffectView {
+    let view = NSVisualEffectView()
+    view.state = .active
+    return view
+  }
+
+  func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+    nsView.material = material
+    nsView.blendingMode = blendingMode
+    nsView.isEmphasized = emphasized
+    nsView.state = .active
   }
 }
 
@@ -1902,18 +2094,38 @@ struct QuickInsertView: View {
   @State private var focusSearchField = false
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 10) {
-      header
+    ZStack {
+      VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
 
-      HStack(alignment: .top, spacing: 12) {
-        leftPane
-        rightPane
+      RoundedRectangle(cornerRadius: 22, style: .continuous)
+        .fill(Color.white.opacity(0.18))
+        .overlay(
+          RoundedRectangle(cornerRadius: 22, style: .continuous)
+            .stroke(Color.white.opacity(0.30), lineWidth: 1)
+        )
+
+      VStack(alignment: .leading, spacing: 10) {
+        header
+
+        HStack(alignment: .top, spacing: 12) {
+          leftPane
+          rightPane
+        }
+        .frame(minHeight: 360)
       }
-      .frame(minHeight: 360)
-
+      .padding(18)
     }
-    .padding(14)
-    .frame(width: 860, height: 500)
+    .frame(
+      minWidth: WindowLayout.quickPanelMinimumSize.width,
+      idealWidth: WindowLayout.quickPanelDefaultSize.width,
+      maxWidth: WindowLayout.quickPanelDefaultSize.width,
+      minHeight: WindowLayout.quickPanelMinimumSize.height,
+      idealHeight: WindowLayout.quickPanelDefaultSize.height,
+      maxHeight: WindowLayout.quickPanelDefaultSize.height
+    )
+    .clipped()
+    .shadow(color: .black.opacity(0.22), radius: 20, y: 12)
     .onAppear {
       selectedItemID = quickItems.first?.id
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -1929,10 +2141,12 @@ struct QuickInsertView: View {
     HStack {
       Text("快速搜索并填充")
         .font(.headline)
+        .lineLimit(1)
       Spacer()
       Text("快捷键: \(settings.hotKeyShortcut.displayString)")
         .font(.caption)
         .foregroundStyle(.secondary)
+        .lineLimit(1)
     }
   }
 
@@ -1943,6 +2157,8 @@ struct QuickInsertView: View {
           Text("当前位置: \(currentGroupPath.joined(separator: " / "))")
             .font(.caption)
             .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
           Spacer()
           Button("返回上一级") {
             navigateUpOneLevel()
@@ -2002,6 +2218,10 @@ struct QuickInsertView: View {
             .id(item.id)
           }
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(panelSectionBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .onChange(of: quickItems.map(\.id)) { ids in
           if let current = selectedItemID, ids.contains(current) { return }
           selectedItemID = ids.first
@@ -2014,7 +2234,7 @@ struct QuickInsertView: View {
         }
       }
     }
-    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    .frame(maxWidth: 332, maxHeight: .infinity, alignment: .topLeading)
   }
 
   private var rightPane: some View {
@@ -2030,6 +2250,8 @@ struct QuickInsertView: View {
           Text(group.path.joined(separator: " / "))
             .font(.caption)
             .foregroundStyle(.secondary)
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
 
           let directChildren = directChildGroupCount(of: group.path)
           let directSnippets = snippetsInExactGroup(group.path).count
@@ -2056,6 +2278,8 @@ struct QuickInsertView: View {
           Text(snippet.groupPath.joined(separator: " / "))
             .font(.caption)
             .foregroundStyle(.secondary)
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
           if !snippet.trigger.isEmpty {
             Text("触发词: \(snippet.trigger)")
               .font(.system(size: settings.fontSize, design: .monospaced))
@@ -2067,17 +2291,18 @@ struct QuickInsertView: View {
               .font(.system(size: settings.fontSize, design: .monospaced))
               .textSelection(.enabled)
               .frame(maxWidth: .infinity, alignment: .leading)
+              .fixedSize(horizontal: false, vertical: true)
               .padding(10)
           }
-          .background(Color(NSColor.textBackgroundColor))
-          .cornerRadius(8)
+          .background(panelSectionBackground)
+          .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
       } else {
         Text("无可预览内容")
           .foregroundStyle(.secondary)
       }
     }
-    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
   }
 
   private var activeSnippets: [Snippet] {
@@ -2098,7 +2323,9 @@ struct QuickInsertView: View {
       }
     }
 
-    return set.values.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    return set.values.sorted { lhs, rhs in
+      store.compareGroups(lhs.path, rhs.path)
+    }
   }
 
   private var filteredSnippets: [Snippet] {
@@ -2133,6 +2360,15 @@ struct QuickInsertView: View {
 
   private var quickItems: [QuickItem] {
     filteredGroups.map { .group($0) } + filteredSnippets.map { .snippet($0) }
+  }
+
+  private var panelSectionBackground: some View {
+    RoundedRectangle(cornerRadius: 14, style: .continuous)
+      .fill(Color.white.opacity(0.16))
+      .overlay(
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+          .stroke(Color.white.opacity(0.20), lineWidth: 1)
+      )
   }
 
   private var selectedItem: QuickItem? {
@@ -2297,6 +2533,92 @@ private enum TrashListItem: Identifiable, Hashable {
   }
 }
 
+private struct SnippetRowDropDelegate: DropDelegate {
+  let targetSnippet: Snippet
+  let visibleSnippets: [Snippet]
+  let groupPath: [String]
+  let isEnabled: Bool
+  @Binding var draggedSnippetID: String?
+  @Binding var dropTargetSnippetID: String?
+  let store: SnippetStore
+
+  func performDrop(info: DropInfo) -> Bool {
+    draggedSnippetID = nil
+    dropTargetSnippetID = nil
+    return true
+  }
+
+  func dropEntered(info: DropInfo) {
+    guard isEnabled else { return }
+    dropTargetSnippetID = targetSnippet.id
+    guard let draggedSnippetID, draggedSnippetID != targetSnippet.id else { return }
+    guard
+      let fromIndex = visibleSnippets.firstIndex(where: { $0.id == draggedSnippetID }),
+      let toIndex = visibleSnippets.firstIndex(where: { $0.id == targetSnippet.id })
+    else { return }
+
+    let destination = fromIndex < toIndex ? toIndex + 1 : toIndex
+    guard destination != fromIndex, destination != fromIndex + 1 else { return }
+    withAnimation(.easeInOut(duration: 0.18)) {
+      store.moveSnippets(in: groupPath, from: IndexSet(integer: fromIndex), to: destination)
+    }
+  }
+
+  func validateDrop(info: DropInfo) -> Bool {
+    isEnabled
+  }
+
+  func dropExited(info: DropInfo) {
+    if dropTargetSnippetID == targetSnippet.id {
+      dropTargetSnippetID = nil
+    }
+  }
+}
+
+private struct GroupRowDropDelegate: DropDelegate {
+  let targetPath: [String]
+  let siblingGroups: [[String]]
+  @Binding var draggedGroupPathKey: String?
+  @Binding var dropTargetGroupPathKey: String?
+  let store: SnippetStore
+
+  func performDrop(info: DropInfo) -> Bool {
+    draggedGroupPathKey = nil
+    dropTargetGroupPathKey = nil
+    return true
+  }
+
+  func dropEntered(info: DropInfo) {
+    let targetKey = targetPath.joined(separator: "/")
+    dropTargetGroupPathKey = targetKey
+    guard let draggedGroupPathKey, draggedGroupPathKey != targetKey else { return }
+
+    let parentPath = Array(targetPath.dropLast())
+    let draggedPath = draggedGroupPathKey.split(separator: "/").map(String.init)
+    guard Array(draggedPath.dropLast()) == parentPath else { return }
+    guard
+      let fromIndex = siblingGroups.firstIndex(of: draggedPath),
+      let toIndex = siblingGroups.firstIndex(of: targetPath)
+    else { return }
+
+    let destination = fromIndex < toIndex ? toIndex + 1 : toIndex
+    guard destination != fromIndex, destination != fromIndex + 1 else { return }
+    withAnimation(.easeInOut(duration: 0.18)) {
+      store.moveGroups(in: parentPath, from: IndexSet(integer: fromIndex), to: destination)
+    }
+  }
+
+  func validateDrop(info: DropInfo) -> Bool {
+    draggedGroupPathKey != nil
+  }
+
+  func dropExited(info: DropInfo) {
+    if dropTargetGroupPathKey == targetPath.joined(separator: "/") {
+      dropTargetGroupPathKey = nil
+    }
+  }
+}
+
 struct ContentView: View {
   @EnvironmentObject private var store: SnippetStore
   @EnvironmentObject private var settings: UISettings
@@ -2309,6 +2631,10 @@ struct ContentView: View {
   @State private var editorTarget: Snippet? = nil
   @State private var newGroupTarget: GroupCreateTarget? = nil
   @State private var renameGroupTarget: GroupRenameTarget? = nil
+  @State private var draggedSnippetID: String? = nil
+  @State private var draggedGroupPathKey: String? = nil
+  @State private var dropTargetSnippetID: String? = nil
+  @State private var dropTargetGroupPathKey: String? = nil
 
   var body: some View {
     NavigationSplitView {
@@ -2375,81 +2701,27 @@ struct ContentView: View {
       .padding(.horizontal, 10)
       .padding(.top, 8)
 
-      List(selection: $selectedSidebarSelection) {
-        HStack(spacing: 6) {
-          Text("全部")
-            .font(.system(size: settings.fontSize))
-            .lineLimit(1)
-          Spacer(minLength: 4)
-          Text("\(globalVisibleSnippetCount)")
-            .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
-            .foregroundStyle(.secondary)
-        }
-        .tag(SidebarSelection.all)
-
-        OutlineGroup(groupTree, children: \.children) { node in
-          let isDisabled = store.isAnyAncestorDisabled(node.path)
-          HStack(spacing: 6) {
-            Image(systemName: "folder")
-              .foregroundStyle(isDisabled ? .tertiary : .secondary)
-            Text(node.name)
-              .font(.system(size: settings.fontSize))
-              .lineLimit(1)
-              .foregroundStyle(isDisabled ? .secondary : .primary)
-            Spacer(minLength: 4)
-            Text("\(node.directCount)/\(node.totalCount)")
-              .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
-              .foregroundStyle(isDisabled ? .tertiary : .secondary)
+      ScrollView {
+        LazyVStack(alignment: .leading, spacing: 4) {
+          sidebarStaticRow(
+            title: "全部",
+            systemImage: nil,
+            countLabel: "\(globalVisibleSnippetCount)",
+            selection: .all
+          )
+          ForEach(flatGroupNodes) { item in
+            sidebarGroupRow(for: item.node, depth: item.depth)
           }
-          .opacity(isDisabled ? 0.55 : 1.0)
-          .tag(SidebarSelection.group(node.path))
-          .contextMenu {
-            Button("新建子分组") {
-              newGroupTarget = GroupCreateTarget(parentPath: node.path)
-            }
-            Button("重命名分组") {
-              renameGroupTarget = GroupRenameTarget(path: node.path)
-            }
-            if store.isGroupDisabled(node.path) {
-              Button("启用分组") {
-                store.enableGroup(node.path)
-              }
-            } else {
-              Button("禁用分组") {
-                store.disableGroup(node.path)
-              }
-            }
-            Button("删除分组", role: .destructive) {
-              let snippetCount = store.snippets.filter { isPrefixPath(node.path, of: $0.groupPath) }.count
-              let subgroupCount = store.groups.filter { isPrefixPath(node.path, of: $0) }.count - 1
-              if confirmDeleteGroup(path: node.path, snippetCount: snippetCount, subgroupCount: max(0, subgroupCount)) {
-                store.deleteGroup(node.path)
-                if case let .group(current) = selectedSidebarSelection, isPrefixPath(node.path, of: current) {
-                  let parent = Array(node.path.dropLast())
-                  selectedSidebarSelection = parent.isEmpty ? .all : .group(parent)
-                }
-              }
-            }
-            Button("在该分组新建片段") {
-              editorTarget = Snippet(id: UUID().uuidString, name: "", description: "", trigger: "", groupPath: node.path, body: "", isFavorite: false)
-            }
-          }
+          sidebarStaticRow(
+            title: "回收站",
+            systemImage: "trash",
+            countLabel: "\(trashItemCount)",
+            selection: .trash
+          )
         }
-
-        HStack(spacing: 6) {
-          Image(systemName: "trash")
-            .foregroundStyle(.secondary)
-          Text("回收站")
-            .font(.system(size: settings.fontSize))
-            .lineLimit(1)
-          Spacer(minLength: 4)
-          Text("\(trashItemCount)")
-            .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
-            .foregroundStyle(.secondary)
-        }
-        .tag(SidebarSelection.trash)
+        .padding(.horizontal, 8)
+        .padding(.bottom, 8)
       }
-      .environment(\.defaultMinListRowHeight, settings.rowHeight)
     }
     .navigationSplitViewColumnWidth(min: 245, ideal: 270, max: 320)
   }
@@ -2488,13 +2760,18 @@ struct ContentView: View {
             .tag(item.id)
         }
       } else {
-        List(filteredSnippets, selection: $selectedItemID) { snippet in
-          snippetRow(for: snippet)
-            .tag(snippet.id)
+        ScrollView {
+          LazyVStack(spacing: 4) {
+            ForEach(filteredSnippets) { snippet in
+              snippetRow(for: snippet)
+            }
+          }
+          .padding(.horizontal, 8)
+          .padding(.bottom, 8)
+          .animation(.easeInOut(duration: 0.18), value: filteredSnippets.map(\.id))
         }
       }
     }
-    .environment(\.defaultMinListRowHeight, settings.rowHeight)
     .onMoveCommand { direction in
       switch direction {
       case .down:
@@ -2512,6 +2789,8 @@ struct ContentView: View {
   private func snippetRow(for snippet: Snippet) -> some View {
     let isDisabled = store.isAnyAncestorDisabled(snippet.groupPath)
     let showPathInList = !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    let isSelected = selectedItemID == snippet.id
+    let isDropTarget = dropTargetSnippetID == snippet.id
     HStack(spacing: 8) {
       Image(systemName: snippet.isFavorite ? "star.fill" : "text.alignleft")
         .foregroundStyle(snippet.isFavorite ? Color.yellow : Color.secondary)
@@ -2539,7 +2818,34 @@ struct ContentView: View {
           .foregroundStyle(isDisabled ? .tertiary : .secondary)
       }
     }
+    .padding(.horizontal, 10)
+    .padding(.vertical, 6)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(rowBackground(isSelected: isSelected, isDropTarget: isDropTarget))
+    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     .opacity(isDisabled ? 0.62 : 1.0)
+    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    .onTapGesture {
+      selectedItemID = snippet.id
+    }
+    .onDrag {
+      guard canReorderSnippets else { return NSItemProvider() }
+      draggedSnippetID = snippet.id
+      selectedItemID = snippet.id
+      return NSItemProvider(object: snippet.id as NSString)
+    }
+    .onDrop(
+      of: [UTType.plainText],
+      delegate: SnippetRowDropDelegate(
+        targetSnippet: snippet,
+        visibleSnippets: filteredSnippets,
+        groupPath: selectedGroupPath,
+        isEnabled: canReorderSnippets,
+        draggedSnippetID: $draggedSnippetID,
+        dropTargetSnippetID: $dropTargetSnippetID,
+        store: store
+      )
+    )
     .contextMenu {
       Button("复制") { copyClean(snippet.body) }
       Button(snippet.isFavorite ? "取消星标" : "设为星标") {
@@ -2835,6 +3141,12 @@ struct ContentView: View {
     store.snippets.filter { !store.isAnyAncestorDisabled($0.groupPath) }.count
   }
 
+  private var canReorderSnippets: Bool {
+    selectedSidebarSelection != .trash
+      && search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      && !selectedGroupPath.isEmpty
+  }
+
   private var trashItemCount: Int {
     store.trashSnippets.count + store.trashGroups.count
   }
@@ -2901,6 +3213,10 @@ struct ContentView: View {
     buildGroupTree(groups: store.groups, snippets: store.snippets)
   }
 
+  private var flatGroupNodes: [FlatGroupNode] {
+    flattenGroupNodes(groupTree)
+  }
+
   private func buildGroupTree(groups: [[String]], snippets: [Snippet]) -> [GroupNode] {
     var childrenByPath: [String: Set<String>] = [:]
     var directByPath: [String: Int] = [:]
@@ -2934,7 +3250,7 @@ struct ContentView: View {
           if lhsDisabled != rhsDisabled {
             return !lhsDisabled && rhsDisabled
           }
-          return lhs.localizedStandardCompare(rhs) == .orderedAscending
+          return store.compareGroups(lhsPath, rhsPath)
         }
 
       return names.map { name in
@@ -2978,6 +3294,136 @@ struct ContentView: View {
         return left.deletedAt > right.deletedAt
       }
       return false
+    }
+  }
+
+  private func sidebarGroupRow(for node: GroupNode, depth: Int) -> some View {
+    let isDisabled = store.isAnyAncestorDisabled(node.path)
+    let siblings = siblingGroupPaths(for: node.path)
+    let selection = SidebarSelection.group(node.path)
+    let isSelected = selectedSidebarSelection == selection
+    let isDropTarget = dropTargetGroupPathKey == node.path.joined(separator: "/")
+
+    return HStack(spacing: 6) {
+      Color.clear.frame(width: CGFloat(depth) * 14, height: 1)
+      Image(systemName: "folder")
+        .foregroundStyle(isDisabled ? .tertiary : .secondary)
+      Text(node.name)
+        .font(.system(size: settings.fontSize))
+        .lineLimit(1)
+        .foregroundStyle(isDisabled ? .secondary : .primary)
+      Spacer(minLength: 4)
+      Text("\(node.directCount)/\(node.totalCount)")
+        .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
+        .foregroundStyle(isDisabled ? .tertiary : .secondary)
+    }
+    .padding(.horizontal, 10)
+    .padding(.vertical, 6)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(rowBackground(isSelected: isSelected, isDropTarget: isDropTarget))
+    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    .opacity(isDisabled ? 0.55 : 1.0)
+    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    .onTapGesture {
+      selectedSidebarSelection = selection
+    }
+    .onDrag {
+      draggedGroupPathKey = node.path.joined(separator: "/")
+      selectedSidebarSelection = selection
+      return NSItemProvider(object: draggedGroupPathKey! as NSString)
+    }
+    .onDrop(
+      of: [UTType.plainText],
+      delegate: GroupRowDropDelegate(
+        targetPath: node.path,
+        siblingGroups: siblings,
+        draggedGroupPathKey: $draggedGroupPathKey,
+        dropTargetGroupPathKey: $dropTargetGroupPathKey,
+        store: store
+      )
+    )
+    .contextMenu {
+      Button("新建子分组") {
+        newGroupTarget = GroupCreateTarget(parentPath: node.path)
+      }
+      Button("重命名分组") {
+        renameGroupTarget = GroupRenameTarget(path: node.path)
+      }
+      if store.isGroupDisabled(node.path) {
+        Button("启用分组") {
+          store.enableGroup(node.path)
+        }
+      } else {
+        Button("禁用分组") {
+          store.disableGroup(node.path)
+        }
+      }
+      Button("删除分组", role: .destructive) {
+        let snippetCount = store.snippets.filter { isPrefixPath(node.path, of: $0.groupPath) }.count
+        let subgroupCount = store.groups.filter { isPrefixPath(node.path, of: $0) }.count - 1
+        if confirmDeleteGroup(path: node.path, snippetCount: snippetCount, subgroupCount: max(0, subgroupCount)) {
+          store.deleteGroup(node.path)
+          if case let .group(current) = selectedSidebarSelection, isPrefixPath(node.path, of: current) {
+            let parent = Array(node.path.dropLast())
+            selectedSidebarSelection = parent.isEmpty ? .all : .group(parent)
+          }
+        }
+      }
+      Button("在该分组新建片段") {
+        editorTarget = Snippet(id: UUID().uuidString, name: "", description: "", trigger: "", groupPath: node.path, body: "", isFavorite: false)
+      }
+    }
+  }
+
+  private func sidebarStaticRow(title: String, systemImage: String?, countLabel: String, selection: SidebarSelection) -> some View {
+    HStack(spacing: 6) {
+      if let systemImage {
+        Image(systemName: systemImage)
+          .foregroundStyle(.secondary)
+      }
+      Text(title)
+        .font(.system(size: settings.fontSize))
+        .lineLimit(1)
+      Spacer(minLength: 4)
+      Text(countLabel)
+        .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
+        .foregroundStyle(.secondary)
+    }
+    .padding(.horizontal, 10)
+    .padding(.vertical, 6)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(rowBackground(isSelected: selectedSidebarSelection == selection, isDropTarget: false))
+    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    .onTapGesture {
+      selectedSidebarSelection = selection
+    }
+  }
+
+  private func rowBackground(isSelected: Bool, isDropTarget: Bool) -> some View {
+    let selectionBlue = Color.accentColor
+    return RoundedRectangle(cornerRadius: 8, style: .continuous)
+      .fill(
+        isDropTarget
+          ? selectionBlue.opacity(0.34)
+          : (isSelected ? selectionBlue.opacity(0.20) : Color.clear)
+      )
+      .overlay(
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+          .stroke(isDropTarget ? selectionBlue.opacity(0.78) : Color.clear, lineWidth: 1)
+      )
+  }
+
+  private func flattenGroupNodes(_ nodes: [GroupNode], depth: Int = 0) -> [FlatGroupNode] {
+    nodes.flatMap { node in
+      [FlatGroupNode(node: node, depth: depth)] + flattenGroupNodes(node.children ?? [], depth: depth + 1)
+    }
+  }
+
+  private func siblingGroupPaths(for path: [String]) -> [[String]] {
+    let parentPath = Array(path.dropLast())
+    return store.groups.filter { candidate in
+      candidate.count == parentPath.count + 1 && Array(candidate.dropLast()) == parentPath
     }
   }
 
