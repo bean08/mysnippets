@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project uses Semantic Versioning for releases.
 
+## [0.0.4] - 2026-03-28
+
+### Changed
+- Removed the quick-panel Enter hint for group navigation and the main-window refresh button
+- Reworked reorder handles to appear only on hover in group and snippet lists
+- Refined the quick insert panel with cleaner corner rendering and stronger left/right pane contrast
+
 ## [0.0.1] - 2026-03-10
 
 ### Added

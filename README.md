@@ -9,6 +9,7 @@
 - Native macOS app built with SwiftUI and AppKit
 - Three-column management UI for groups, snippets, and preview
 - Global quick insert panel with nested group navigation
+- Quick insert panel with clearer left/right pane contrast and cleaner rounded corners
 - Optional snippet descriptions for search and export
 - Preview-only comments via `{{! ... }}`
 - Raycast-like placeholders: `{cursor}`, `{clipboard}`, `{date}`, `{time}`, `{datetime}`, `{uuid}`
@@ -85,11 +86,12 @@ Storage schema:
 
 ## Release
 
-- Current version: `0.0.3` (from [`VERSION`](VERSION))
-- Recommended Git tag: `v0.0.3`
-- Latest changes in `v0.0.3`:
-  - Added folder icons to main-window group rows and group detail headers
-  - Disabled groups now sort after enabled groups in the sidebar
+- Current version: `0.0.4` (from [`VERSION`](VERSION))
+- Recommended Git tag: `v0.0.4`
+- Latest changes in `v0.0.4`:
+  - Removed redundant quick-panel hints and the sidebar refresh button
+  - Reworked reorder handles so they appear only on hover
+  - Refined quick-panel visuals with cleaner corners and stronger pane contrast
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
 
 ## License

@@ -2099,10 +2099,10 @@ struct QuickInsertView: View {
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
 
       RoundedRectangle(cornerRadius: 22, style: .continuous)
-        .fill(Color.white.opacity(0.18))
+        .fill(Color.white.opacity(0.14))
         .overlay(
           RoundedRectangle(cornerRadius: 22, style: .continuous)
-            .stroke(Color.white.opacity(0.30), lineWidth: 1)
+            .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
         )
 
       VStack(alignment: .leading, spacing: 10) {
@@ -2124,8 +2124,8 @@ struct QuickInsertView: View {
       idealHeight: WindowLayout.quickPanelDefaultSize.height,
       maxHeight: WindowLayout.quickPanelDefaultSize.height
     )
-    .clipped()
-    .shadow(color: .black.opacity(0.22), radius: 20, y: 12)
+    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+    .shadow(color: .black.opacity(0.04), radius: 8, y: 3)
     .onAppear {
       selectedItemID = quickItems.first?.id
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -2220,8 +2220,6 @@ struct QuickInsertView: View {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .background(panelSectionBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .onChange(of: quickItems.map(\.id)) { ids in
           if let current = selectedItemID, ids.contains(current) { return }
           selectedItemID = ids.first
@@ -2234,6 +2232,9 @@ struct QuickInsertView: View {
         }
       }
     }
+    .padding(12)
+    .background(quickPaneBackground(fillOpacity: 0.06, strokeOpacity: 0.12))
+    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     .frame(maxWidth: 332, maxHeight: .infinity, alignment: .topLeading)
   }
 
@@ -2299,7 +2300,10 @@ struct QuickInsertView: View {
           .foregroundStyle(.secondary)
       }
     }
+    .padding(12)
     .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    .background(quickPaneBackground(fillOpacity: 0.22, strokeOpacity: 0.28))
+    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
   }
 
   private var activeSnippets: [Snippet] {
@@ -2365,6 +2369,15 @@ struct QuickInsertView: View {
       .overlay(
         RoundedRectangle(cornerRadius: 14, style: .continuous)
           .stroke(Color.white.opacity(0.20), lineWidth: 1)
+      )
+  }
+
+  private func quickPaneBackground(fillOpacity: Double, strokeOpacity: Double) -> some View {
+    RoundedRectangle(cornerRadius: 18, style: .continuous)
+      .fill(Color.white.opacity(fillOpacity))
+      .overlay(
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+          .stroke(Color.white.opacity(strokeOpacity), lineWidth: 0.8)
       )
   }
 
@@ -2632,6 +2645,8 @@ struct ContentView: View {
   @State private var draggedGroupPathKey: String? = nil
   @State private var dropTargetSnippetID: String? = nil
   @State private var dropTargetGroupPathKey: String? = nil
+  @State private var hoveredSnippetID: String? = nil
+  @State private var hoveredGroupPathKey: String? = nil
 
   var body: some View {
     NavigationSplitView {
@@ -2711,6 +2726,7 @@ struct ContentView: View {
         OutlineGroup(groupTree, children: \.children) { node in
           let isDisabled = store.isAnyAncestorDisabled(node.path)
           let siblings = siblingGroupPaths(for: node.path)
+          let groupPathKey = node.path.joined(separator: "/")
           HStack(spacing: 6) {
             Image(systemName: "folder")
               .foregroundStyle(isDisabled ? .tertiary : .secondary)
@@ -2722,17 +2738,24 @@ struct ContentView: View {
             Text("\(node.directCount)/\(node.totalCount)")
               .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
               .foregroundStyle(isDisabled ? .tertiary : .secondary)
-            Image(systemName: "line.3.horizontal")
-              .font(.system(size: max(10, settings.fontSize - 1), weight: .semibold))
-              .foregroundStyle(.tertiary)
-              .help("拖拽排序")
-              .onDrag {
-                draggedGroupPathKey = node.path.joined(separator: "/")
-                selectedSidebarSelection = .group(node.path)
-                return NSItemProvider(object: draggedGroupPathKey! as NSString)
-              }
+            if hoveredGroupPathKey == groupPathKey {
+              Image(systemName: "line.3.horizontal")
+                .font(.system(size: max(10, settings.fontSize - 1), weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .help("拖拽排序")
+                .transition(.opacity)
+                .onDrag {
+                  draggedGroupPathKey = groupPathKey
+                  selectedSidebarSelection = .group(node.path)
+                  return NSItemProvider(object: draggedGroupPathKey! as NSString)
+                }
+            }
           }
           .opacity(isDisabled ? 0.55 : 1.0)
+          .onHover { hovering in
+            hoveredGroupPathKey = hovering ? groupPathKey : (hoveredGroupPathKey == groupPathKey ? nil : hoveredGroupPathKey)
+          }
+          .animation(.easeInOut(duration: 0.12), value: hoveredGroupPathKey == groupPathKey)
           .tag(SidebarSelection.group(node.path))
           .onDrop(
             of: [UTType.plainText],
@@ -2879,11 +2902,12 @@ struct ContentView: View {
           .font(.system(size: max(10, settings.fontSize - 1), weight: .medium, design: .monospaced))
           .foregroundStyle(isDisabled ? .tertiary : .secondary)
       }
-      if canReorderSnippets {
+      if canReorderSnippets && hoveredSnippetID == snippet.id {
         Image(systemName: "line.3.horizontal")
           .font(.system(size: max(10, settings.fontSize - 1), weight: .semibold))
           .foregroundStyle(.tertiary)
           .help("拖拽排序")
+          .transition(.opacity)
           .onDrag {
             draggedSnippetID = snippet.id
             selectedItemID = snippet.id
@@ -2892,6 +2916,16 @@ struct ContentView: View {
       }
     }
     .opacity(isDisabled ? 0.62 : 1.0)
+    .onHover { hovering in
+      guard canReorderSnippets else {
+        if hoveredSnippetID == snippet.id {
+          hoveredSnippetID = nil
+        }
+        return
+      }
+      hoveredSnippetID = hovering ? snippet.id : (hoveredSnippetID == snippet.id ? nil : hoveredSnippetID)
+    }
+    .animation(.easeInOut(duration: 0.12), value: hoveredSnippetID == snippet.id)
     .onDrop(
       of: [UTType.plainText],
       delegate: SnippetRowDropDelegate(
