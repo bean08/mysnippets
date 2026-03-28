@@ -2264,9 +2264,6 @@ struct QuickInsertView: View {
           .font(.system(size: settings.fontSize))
 
           Spacer()
-          Text("按 Enter 进入该组下一级")
-            .font(.caption)
-            .foregroundStyle(.secondary)
         case .snippet(let snippet):
           Text(snippet.name)
             .font(.title3.weight(.semibold))
@@ -2695,8 +2692,6 @@ struct ContentView: View {
           Button("新建分组") { newGroupTarget = GroupCreateTarget(parentPath: selectedGroupPath) }
             .buttonStyle(.borderless)
         }
-        Button("刷新") { store.reload() }
-          .buttonStyle(.borderless)
       }
       .padding(.horizontal, 10)
       .padding(.top, 8)
