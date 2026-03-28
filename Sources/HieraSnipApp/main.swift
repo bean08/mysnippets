@@ -3229,7 +3229,7 @@ struct ContentView: View {
       ].joined(separator: "\n").lowercased()
       return text.contains(q)
     }
-    .sorted(by: store.compareSnippets)
+    .sorted(by: compareSnippetsForMainList)
   }
 
   private var filteredTrashItems: [TrashListItem] {
@@ -3274,6 +3274,13 @@ struct ContentView: View {
 
   private var groupTree: [GroupNode] {
     buildGroupTree(groups: store.groups, snippets: store.snippets)
+  }
+
+  private func compareSnippetsForMainList(_ lhs: Snippet, _ rhs: Snippet) -> Bool {
+    if selectedGroupPath.isEmpty, lhs.isFavorite != rhs.isFavorite {
+      return lhs.isFavorite && !rhs.isFavorite
+    }
+    return store.compareSnippets(lhs, rhs)
   }
 
   private func buildGroupTree(groups: [[String]], snippets: [Snippet]) -> [GroupNode] {
