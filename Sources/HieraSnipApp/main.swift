@@ -2701,27 +2701,101 @@ struct ContentView: View {
       .padding(.horizontal, 10)
       .padding(.top, 8)
 
-      ScrollView {
-        LazyVStack(alignment: .leading, spacing: 4) {
-          sidebarStaticRow(
-            title: "全部",
-            systemImage: nil,
-            countLabel: "\(globalVisibleSnippetCount)",
-            selection: .all
-          )
-          ForEach(flatGroupNodes) { item in
-            sidebarGroupRow(for: item.node, depth: item.depth)
-          }
-          sidebarStaticRow(
-            title: "回收站",
-            systemImage: "trash",
-            countLabel: "\(trashItemCount)",
-            selection: .trash
-          )
+      List(selection: $selectedSidebarSelection) {
+        HStack(spacing: 6) {
+          Text("全部")
+            .font(.system(size: settings.fontSize))
+            .lineLimit(1)
+          Spacer(minLength: 4)
+          Text("\(globalVisibleSnippetCount)")
+            .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
+            .foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 8)
-        .padding(.bottom, 8)
+        .tag(SidebarSelection.all)
+
+        OutlineGroup(groupTree, children: \.children) { node in
+          let isDisabled = store.isAnyAncestorDisabled(node.path)
+          let siblings = siblingGroupPaths(for: node.path)
+          HStack(spacing: 6) {
+            Image(systemName: "folder")
+              .foregroundStyle(isDisabled ? .tertiary : .secondary)
+            Text(node.name)
+              .font(.system(size: settings.fontSize))
+              .lineLimit(1)
+              .foregroundStyle(isDisabled ? .secondary : .primary)
+            Spacer(minLength: 4)
+            Text("\(node.directCount)/\(node.totalCount)")
+              .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
+              .foregroundStyle(isDisabled ? .tertiary : .secondary)
+            Image(systemName: "line.3.horizontal")
+              .font(.system(size: max(10, settings.fontSize - 1), weight: .semibold))
+              .foregroundStyle(.tertiary)
+              .help("拖拽排序")
+              .onDrag {
+                draggedGroupPathKey = node.path.joined(separator: "/")
+                selectedSidebarSelection = .group(node.path)
+                return NSItemProvider(object: draggedGroupPathKey! as NSString)
+              }
+          }
+          .opacity(isDisabled ? 0.55 : 1.0)
+          .tag(SidebarSelection.group(node.path))
+          .onDrop(
+            of: [UTType.plainText],
+            delegate: GroupRowDropDelegate(
+              targetPath: node.path,
+              siblingGroups: siblings,
+              draggedGroupPathKey: $draggedGroupPathKey,
+              dropTargetGroupPathKey: $dropTargetGroupPathKey,
+              store: store
+            )
+          )
+          .contextMenu {
+            Button("新建子分组") {
+              newGroupTarget = GroupCreateTarget(parentPath: node.path)
+            }
+            Button("重命名分组") {
+              renameGroupTarget = GroupRenameTarget(path: node.path)
+            }
+            if store.isGroupDisabled(node.path) {
+              Button("启用分组") {
+                store.enableGroup(node.path)
+              }
+            } else {
+              Button("禁用分组") {
+                store.disableGroup(node.path)
+              }
+            }
+            Button("删除分组", role: .destructive) {
+              let snippetCount = store.snippets.filter { isPrefixPath(node.path, of: $0.groupPath) }.count
+              let subgroupCount = store.groups.filter { isPrefixPath(node.path, of: $0) }.count - 1
+              if confirmDeleteGroup(path: node.path, snippetCount: snippetCount, subgroupCount: max(0, subgroupCount)) {
+                store.deleteGroup(node.path)
+                if case let .group(current) = selectedSidebarSelection, isPrefixPath(node.path, of: current) {
+                  let parent = Array(node.path.dropLast())
+                  selectedSidebarSelection = parent.isEmpty ? .all : .group(parent)
+                }
+              }
+            }
+            Button("在该分组新建片段") {
+              editorTarget = Snippet(id: UUID().uuidString, name: "", description: "", trigger: "", groupPath: node.path, body: "", isFavorite: false)
+            }
+          }
+        }
+
+        HStack(spacing: 6) {
+          Image(systemName: "trash")
+            .foregroundStyle(.secondary)
+          Text("回收站")
+            .font(.system(size: settings.fontSize))
+            .lineLimit(1)
+          Spacer(minLength: 4)
+          Text("\(trashItemCount)")
+            .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
+            .foregroundStyle(.secondary)
+        }
+        .tag(SidebarSelection.trash)
       }
+      .environment(\.defaultMinListRowHeight, settings.rowHeight)
     }
     .navigationSplitViewColumnWidth(min: 245, ideal: 270, max: 320)
   }
@@ -2760,18 +2834,13 @@ struct ContentView: View {
             .tag(item.id)
         }
       } else {
-        ScrollView {
-          LazyVStack(spacing: 4) {
-            ForEach(filteredSnippets) { snippet in
-              snippetRow(for: snippet)
-            }
-          }
-          .padding(.horizontal, 8)
-          .padding(.bottom, 8)
-          .animation(.easeInOut(duration: 0.18), value: filteredSnippets.map(\.id))
+        List(filteredSnippets, selection: $selectedItemID) { snippet in
+          snippetRow(for: snippet)
+            .tag(snippet.id)
         }
       }
     }
+    .environment(\.defaultMinListRowHeight, settings.rowHeight)
     .onMoveCommand { direction in
       switch direction {
       case .down:
@@ -2789,8 +2858,6 @@ struct ContentView: View {
   private func snippetRow(for snippet: Snippet) -> some View {
     let isDisabled = store.isAnyAncestorDisabled(snippet.groupPath)
     let showPathInList = !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    let isSelected = selectedItemID == snippet.id
-    let isDropTarget = dropTargetSnippetID == snippet.id
     HStack(spacing: 8) {
       Image(systemName: snippet.isFavorite ? "star.fill" : "text.alignleft")
         .foregroundStyle(snippet.isFavorite ? Color.yellow : Color.secondary)
@@ -2817,23 +2884,19 @@ struct ContentView: View {
           .font(.system(size: max(10, settings.fontSize - 1), weight: .medium, design: .monospaced))
           .foregroundStyle(isDisabled ? .tertiary : .secondary)
       }
+      if canReorderSnippets {
+        Image(systemName: "line.3.horizontal")
+          .font(.system(size: max(10, settings.fontSize - 1), weight: .semibold))
+          .foregroundStyle(.tertiary)
+          .help("拖拽排序")
+          .onDrag {
+            draggedSnippetID = snippet.id
+            selectedItemID = snippet.id
+            return NSItemProvider(object: snippet.id as NSString)
+          }
+      }
     }
-    .padding(.horizontal, 10)
-    .padding(.vertical, 6)
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .background(rowBackground(isSelected: isSelected, isDropTarget: isDropTarget))
-    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     .opacity(isDisabled ? 0.62 : 1.0)
-    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-    .onTapGesture {
-      selectedItemID = snippet.id
-    }
-    .onDrag {
-      guard canReorderSnippets else { return NSItemProvider() }
-      draggedSnippetID = snippet.id
-      selectedItemID = snippet.id
-      return NSItemProvider(object: snippet.id as NSString)
-    }
     .onDrop(
       of: [UTType.plainText],
       delegate: SnippetRowDropDelegate(
@@ -3213,10 +3276,6 @@ struct ContentView: View {
     buildGroupTree(groups: store.groups, snippets: store.snippets)
   }
 
-  private var flatGroupNodes: [FlatGroupNode] {
-    flattenGroupNodes(groupTree)
-  }
-
   private func buildGroupTree(groups: [[String]], snippets: [Snippet]) -> [GroupNode] {
     var childrenByPath: [String: Set<String>] = [:]
     var directByPath: [String: Int] = [:]
@@ -3294,129 +3353,6 @@ struct ContentView: View {
         return left.deletedAt > right.deletedAt
       }
       return false
-    }
-  }
-
-  private func sidebarGroupRow(for node: GroupNode, depth: Int) -> some View {
-    let isDisabled = store.isAnyAncestorDisabled(node.path)
-    let siblings = siblingGroupPaths(for: node.path)
-    let selection = SidebarSelection.group(node.path)
-    let isSelected = selectedSidebarSelection == selection
-    let isDropTarget = dropTargetGroupPathKey == node.path.joined(separator: "/")
-
-    return HStack(spacing: 6) {
-      Color.clear.frame(width: CGFloat(depth) * 14, height: 1)
-      Image(systemName: "folder")
-        .foregroundStyle(isDisabled ? .tertiary : .secondary)
-      Text(node.name)
-        .font(.system(size: settings.fontSize))
-        .lineLimit(1)
-        .foregroundStyle(isDisabled ? .secondary : .primary)
-      Spacer(minLength: 4)
-      Text("\(node.directCount)/\(node.totalCount)")
-        .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
-        .foregroundStyle(isDisabled ? .tertiary : .secondary)
-    }
-    .padding(.horizontal, 10)
-    .padding(.vertical, 6)
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .background(rowBackground(isSelected: isSelected, isDropTarget: isDropTarget))
-    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-    .opacity(isDisabled ? 0.55 : 1.0)
-    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-    .onTapGesture {
-      selectedSidebarSelection = selection
-    }
-    .onDrag {
-      draggedGroupPathKey = node.path.joined(separator: "/")
-      selectedSidebarSelection = selection
-      return NSItemProvider(object: draggedGroupPathKey! as NSString)
-    }
-    .onDrop(
-      of: [UTType.plainText],
-      delegate: GroupRowDropDelegate(
-        targetPath: node.path,
-        siblingGroups: siblings,
-        draggedGroupPathKey: $draggedGroupPathKey,
-        dropTargetGroupPathKey: $dropTargetGroupPathKey,
-        store: store
-      )
-    )
-    .contextMenu {
-      Button("新建子分组") {
-        newGroupTarget = GroupCreateTarget(parentPath: node.path)
-      }
-      Button("重命名分组") {
-        renameGroupTarget = GroupRenameTarget(path: node.path)
-      }
-      if store.isGroupDisabled(node.path) {
-        Button("启用分组") {
-          store.enableGroup(node.path)
-        }
-      } else {
-        Button("禁用分组") {
-          store.disableGroup(node.path)
-        }
-      }
-      Button("删除分组", role: .destructive) {
-        let snippetCount = store.snippets.filter { isPrefixPath(node.path, of: $0.groupPath) }.count
-        let subgroupCount = store.groups.filter { isPrefixPath(node.path, of: $0) }.count - 1
-        if confirmDeleteGroup(path: node.path, snippetCount: snippetCount, subgroupCount: max(0, subgroupCount)) {
-          store.deleteGroup(node.path)
-          if case let .group(current) = selectedSidebarSelection, isPrefixPath(node.path, of: current) {
-            let parent = Array(node.path.dropLast())
-            selectedSidebarSelection = parent.isEmpty ? .all : .group(parent)
-          }
-        }
-      }
-      Button("在该分组新建片段") {
-        editorTarget = Snippet(id: UUID().uuidString, name: "", description: "", trigger: "", groupPath: node.path, body: "", isFavorite: false)
-      }
-    }
-  }
-
-  private func sidebarStaticRow(title: String, systemImage: String?, countLabel: String, selection: SidebarSelection) -> some View {
-    HStack(spacing: 6) {
-      if let systemImage {
-        Image(systemName: systemImage)
-          .foregroundStyle(.secondary)
-      }
-      Text(title)
-        .font(.system(size: settings.fontSize))
-        .lineLimit(1)
-      Spacer(minLength: 4)
-      Text(countLabel)
-        .font(.system(size: max(10, settings.fontSize - 1), design: .monospaced))
-        .foregroundStyle(.secondary)
-    }
-    .padding(.horizontal, 10)
-    .padding(.vertical, 6)
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .background(rowBackground(isSelected: selectedSidebarSelection == selection, isDropTarget: false))
-    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-    .onTapGesture {
-      selectedSidebarSelection = selection
-    }
-  }
-
-  private func rowBackground(isSelected: Bool, isDropTarget: Bool) -> some View {
-    let selectionBlue = Color.accentColor
-    return RoundedRectangle(cornerRadius: 8, style: .continuous)
-      .fill(
-        isDropTarget
-          ? selectionBlue.opacity(0.34)
-          : (isSelected ? selectionBlue.opacity(0.20) : Color.clear)
-      )
-      .overlay(
-        RoundedRectangle(cornerRadius: 8, style: .continuous)
-          .stroke(isDropTarget ? selectionBlue.opacity(0.78) : Color.clear, lineWidth: 1)
-      )
-  }
-
-  private func flattenGroupNodes(_ nodes: [GroupNode], depth: Int = 0) -> [FlatGroupNode] {
-    nodes.flatMap { node in
-      [FlatGroupNode(node: node, depth: depth)] + flattenGroupNodes(node.children ?? [], depth: depth + 1)
     }
   }
 
