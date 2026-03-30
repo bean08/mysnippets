@@ -2095,11 +2095,11 @@ struct QuickInsertView: View {
 
   var body: some View {
     ZStack {
-      VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
+      VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
 
       RoundedRectangle(cornerRadius: 22, style: .continuous)
-        .fill(Color.white.opacity(0.14))
+        .fill(Color.white.opacity(0.08))
         .overlay(
           RoundedRectangle(cornerRadius: 22, style: .continuous)
             .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
@@ -2179,31 +2179,39 @@ struct QuickInsertView: View {
 
       ScrollViewReader { proxy in
         List(quickItems, selection: $selectedItemID) { item in
+          let isSelected = selectedItemID == item.id
           switch item {
           case .group(let group):
             HStack(spacing: 8) {
               Image(systemName: "folder")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(isSelected ? Color.white : Color.secondary)
               Text(group.name)
                 .font(.system(size: settings.fontSize, weight: .medium))
+                .foregroundStyle(isSelected ? Color.white : Color.primary)
               Spacer(minLength: 4)
               Text("组")
                 .font(.system(size: max(10, settings.fontSize - 2)))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(isSelected ? Color.white.opacity(0.9) : Color.secondary)
             }
+            .listRowBackground(rowSelectionBackground(isSelected: isSelected))
             .tag(item.id)
             .id(item.id)
           case .snippet(let snippet):
             HStack(spacing: 8) {
               Image(systemName: snippet.isFavorite ? "star.fill" : "text.alignleft")
-                .foregroundStyle(snippet.isFavorite ? .yellow : .secondary)
+                .foregroundStyle(
+                  isSelected
+                    ? Color.white
+                    : (snippet.isFavorite ? Color.yellow : Color.secondary)
+                )
               VStack(alignment: .leading, spacing: 2) {
                 Text(snippet.name)
                   .font(.system(size: settings.fontSize))
+                  .foregroundStyle(isSelected ? Color.white : Color.primary)
                 if !snippet.description.isEmpty {
                   Text(snippet.description)
                     .font(.system(size: max(10, settings.fontSize - 2)))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.9) : Color.secondary)
                     .lineLimit(1)
                 }
               }
@@ -2211,15 +2219,17 @@ struct QuickInsertView: View {
               if !snippet.trigger.isEmpty {
                 Text(snippet.trigger)
                   .font(.system(size: max(10, settings.fontSize - 1), weight: .medium, design: .monospaced))
-                  .foregroundStyle(.secondary)
+                  .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.secondary)
               }
             }
+            .listRowBackground(rowSelectionBackground(isSelected: isSelected))
             .tag(item.id)
             .id(item.id)
           }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
+        .tint(.blue)
         .onChange(of: quickItems.map(\.id)) { ids in
           if let current = selectedItemID, ids.contains(current) { return }
           selectedItemID = ids.first
@@ -2379,6 +2389,17 @@ struct QuickInsertView: View {
         RoundedRectangle(cornerRadius: 18, style: .continuous)
           .stroke(Color.white.opacity(strokeOpacity), lineWidth: 0.8)
       )
+  }
+
+  @ViewBuilder
+  private func rowSelectionBackground(isSelected: Bool) -> some View {
+    if isSelected {
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .fill(Color.blue.opacity(0.92))
+        .padding(.vertical, 2)
+    } else {
+      Color.clear
+    }
   }
 
   private var selectedItem: QuickItem? {
