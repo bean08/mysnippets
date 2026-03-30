@@ -2178,58 +2178,21 @@ struct QuickInsertView: View {
       )
 
       ScrollViewReader { proxy in
-        List(quickItems, selection: $selectedItemID) { item in
-          let isSelected = selectedItemID == item.id
-          switch item {
-          case .group(let group):
-            HStack(spacing: 8) {
-              Image(systemName: "folder")
-                .foregroundStyle(isSelected ? Color.white : Color.secondary)
-              Text(group.name)
-                .font(.system(size: settings.fontSize, weight: .medium))
-                .foregroundStyle(isSelected ? Color.white : Color.primary)
-              Spacer(minLength: 4)
-              Text("组")
-                .font(.system(size: max(10, settings.fontSize - 2)))
-                .foregroundStyle(isSelected ? Color.white.opacity(0.9) : Color.secondary)
-            }
-            .listRowBackground(rowSelectionBackground(isSelected: isSelected))
-            .tag(item.id)
-            .id(item.id)
-          case .snippet(let snippet):
-            HStack(spacing: 8) {
-              Image(systemName: snippet.isFavorite ? "star.fill" : "text.alignleft")
-                .foregroundStyle(
-                  isSelected
-                    ? Color.white
-                    : (snippet.isFavorite ? Color.yellow : Color.secondary)
-                )
-              VStack(alignment: .leading, spacing: 2) {
-                Text(snippet.name)
-                  .font(.system(size: settings.fontSize))
-                  .foregroundStyle(isSelected ? Color.white : Color.primary)
-                if !snippet.description.isEmpty {
-                  Text(snippet.description)
-                    .font(.system(size: max(10, settings.fontSize - 2)))
-                    .foregroundStyle(isSelected ? Color.white.opacity(0.9) : Color.secondary)
-                    .lineLimit(1)
+        ScrollView {
+          LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(quickItems.enumerated()), id: \.element.id) { index, item in
+              VStack(spacing: 0) {
+                quickItemRow(item)
+                  .id(item.id)
+
+                if index < quickItems.count - 1 {
+                  quickItemSeparator
                 }
               }
-              Spacer(minLength: 4)
-              if !snippet.trigger.isEmpty {
-                Text(snippet.trigger)
-                  .font(.system(size: max(10, settings.fontSize - 1), weight: .medium, design: .monospaced))
-                  .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.secondary)
-              }
             }
-            .listRowBackground(rowSelectionBackground(isSelected: isSelected))
-            .tag(item.id)
-            .id(item.id)
           }
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .tint(.blue)
+        .clipped()
         .onChange(of: quickItems.map(\.id)) { ids in
           if let current = selectedItemID, ids.contains(current) { return }
           selectedItemID = ids.first
@@ -2391,15 +2354,77 @@ struct QuickInsertView: View {
       )
   }
 
+  private func quickItemRow(_ item: QuickItem) -> some View {
+    let isSelected = selectedItemID == item.id
+
+    return quickItemContent(item, isSelected: isSelected)
+      .padding(.horizontal, 8)
+      .padding(.vertical, 5)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .fill(isSelected ? Color.blue.opacity(0.92) : Color.clear)
+      )
+      .contentShape(Rectangle())
+      .onTapGesture(count: 2) {
+        selectedItemID = item.id
+        handleSubmit()
+      }
+      .onTapGesture {
+        selectedItemID = item.id
+      }
+  }
+
   @ViewBuilder
-  private func rowSelectionBackground(isSelected: Bool) -> some View {
-    if isSelected {
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .fill(Color.blue.opacity(0.92))
-        .padding(.vertical, 2)
-    } else {
-      Color.clear
+  private func quickItemContent(_ item: QuickItem, isSelected: Bool) -> some View {
+    switch item {
+    case .group(let group):
+      HStack(spacing: 8) {
+        Image(systemName: "folder")
+          .foregroundStyle(isSelected ? Color.white : Color.secondary)
+        Text(group.name)
+          .font(.system(size: settings.fontSize, weight: .medium))
+          .foregroundStyle(isSelected ? Color.white : Color.primary)
+        Spacer(minLength: 4)
+        Text("组")
+          .font(.system(size: max(10, settings.fontSize - 2)))
+          .foregroundStyle(isSelected ? Color.white.opacity(0.9) : Color.secondary)
+      }
+    case .snippet(let snippet):
+      HStack(spacing: 8) {
+        Image(systemName: snippet.isFavorite ? "star.fill" : "text.alignleft")
+          .foregroundStyle(
+            isSelected
+              ? Color.white
+              : (snippet.isFavorite ? Color.yellow : Color.secondary)
+          )
+        VStack(alignment: .leading, spacing: 2) {
+          Text(snippet.name)
+            .font(.system(size: settings.fontSize))
+            .foregroundStyle(isSelected ? Color.white : Color.primary)
+          if !snippet.description.isEmpty {
+            Text(snippet.description)
+              .font(.system(size: max(10, settings.fontSize - 2)))
+              .foregroundStyle(isSelected ? Color.white.opacity(0.9) : Color.secondary)
+              .lineLimit(1)
+          }
+        }
+        Spacer(minLength: 4)
+        if !snippet.trigger.isEmpty {
+          Text(snippet.trigger)
+            .font(.system(size: max(10, settings.fontSize - 1), weight: .medium, design: .monospaced))
+            .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.secondary)
+        }
+      }
     }
+  }
+
+  private var quickItemSeparator: some View {
+    Rectangle()
+      .fill(Color.black.opacity(0.08))
+      .frame(height: 0.5)
+      .padding(.leading, 32)
+      .padding(.trailing, 8)
   }
 
   private var selectedItem: QuickItem? {
