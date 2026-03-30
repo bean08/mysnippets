@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project uses Semantic Versioning for releases.
 
+## [0.0.5] - 2026-03-30
+
+### Changed
+- Replaced several main-window action buttons with icon-first controls
+- Enlarged main-window action icons for better scanability
+- Refined the search field with a taller, more polished native macOS search style
+
 ## [0.0.4] - 2026-03-28
 
 ### Changed

@@ -86,12 +86,12 @@ Storage schema:
 
 ## Release
 
-- Current version: `0.0.4` (from [`VERSION`](VERSION))
-- Recommended Git tag: `v0.0.4`
-- Latest changes in `v0.0.4`:
-  - Removed redundant quick-panel hints and the sidebar refresh button
-  - Reworked reorder handles so they appear only on hover
-  - Refined quick-panel visuals with cleaner corners and stronger pane contrast
+- Current version: `0.0.5` (Git release)
+- Recommended Git tag: `v0.0.5`
+- Latest changes in `v0.0.5`:
+  - Replaced several main-window action buttons with icon-first controls
+  - Enlarged action icons for better scanability
+  - Refined the search field to use a taller, more polished native macOS search style
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
 
 ## License
