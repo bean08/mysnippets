@@ -2176,6 +2176,7 @@ struct QuickInsertView: View {
         onSubmit: { handleSubmit() },
         onEscape: { handleEscape() }
       )
+      .frame(height: 34)
 
       ScrollViewReader { proxy in
         ScrollView {
@@ -2517,20 +2518,23 @@ struct QuickSearchField: NSViewRepresentable {
     Coordinator(self)
   }
 
-  func makeNSView(context: Context) -> NSTextField {
-    let field = NSTextField()
-    field.isBordered = true
-    field.bezelStyle = .roundedBezel
+  func makeNSView(context: Context) -> NSSearchField {
+    let field = NSSearchField()
     field.focusRingType = .default
     field.usesSingleLineMode = true
     field.lineBreakMode = .byTruncatingTail
+    field.controlSize = .large
+    field.font = .systemFont(ofSize: 14)
+    field.maximumRecents = 0
+    field.recentsAutosaveName = nil
+    field.sendsSearchStringImmediately = true
     field.placeholderString = placeholder
     field.stringValue = text
     field.delegate = context.coordinator
     return field
   }
 
-  func updateNSView(_ nsView: NSTextField, context: Context) {
+  func updateNSView(_ nsView: NSSearchField, context: Context) {
     if nsView.stringValue != text {
       nsView.stringValue = text
     }
@@ -2544,7 +2548,7 @@ struct QuickSearchField: NSViewRepresentable {
     }
   }
 
-  final class Coordinator: NSObject, NSTextFieldDelegate {
+  final class Coordinator: NSObject, NSSearchFieldDelegate {
     var parent: QuickSearchField
 
     init(_ parent: QuickSearchField) {
@@ -2694,6 +2698,25 @@ struct ContentView: View {
   @State private var hoveredSnippetID: String? = nil
   @State private var hoveredGroupPathKey: String? = nil
 
+  private struct MainIconButton: View {
+    let systemName: String
+    let helpText: String
+    var role: ButtonRole? = nil
+    let action: () -> Void
+
+    var body: some View {
+      Button(role: role, action: action) {
+        Image(systemName: systemName)
+          .font(.system(size: 15, weight: .medium))
+          .frame(width: 24, height: 24)
+          .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+      }
+      .buttonStyle(.borderless)
+      .help(helpText)
+      .accessibilityLabel(Text(helpText))
+    }
+  }
+
   var body: some View {
     NavigationSplitView {
       sidebarPane
@@ -2750,8 +2773,9 @@ struct ContentView: View {
           .font(.headline)
         Spacer()
         if selectedSidebarSelection != .trash {
-          Button("新建分组") { newGroupTarget = GroupCreateTarget(parentPath: selectedGroupPath) }
-            .buttonStyle(.borderless)
+          MainIconButton(systemName: "folder.badge.plus", helpText: "新建分组") {
+            newGroupTarget = GroupCreateTarget(parentPath: selectedGroupPath)
+          }
         }
       }
       .padding(.horizontal, 10)
@@ -2876,15 +2900,16 @@ struct ContentView: View {
           onSubmit: {},
           onEscape: {}
         )
+        .frame(height: 34)
         if selectedSidebarSelection == .trash {
-          Button("清空回收站", role: .destructive) {
+          MainIconButton(systemName: "trash.slash", helpText: "清空回收站", role: .destructive) {
             if confirmEmptyTrash(itemCount: trashItemCount) {
               store.emptyTrash()
             }
           }
           .disabled(trashItemCount == 0)
         } else {
-          Button("新建") {
+          MainIconButton(systemName: "plus.circle", helpText: "新建片段") {
             editorTarget = Snippet(id: UUID().uuidString, name: "", description: "", trigger: "", groupPath: selectedGroupPath, body: "", isFavorite: false)
           }
         }
@@ -3064,20 +3089,23 @@ struct ContentView: View {
           .font(.headline)
         Spacer()
         if let snippet = selectedSnippet {
-          Button(snippet.isFavorite ? "取消星标" : "星标") {
+          MainIconButton(
+            systemName: snippet.isFavorite ? "star.slash" : "star",
+            helpText: snippet.isFavorite ? "取消星标" : "星标"
+          ) {
             store.toggleFavorite(for: snippet)
           }
-          Button("复制") {
+          MainIconButton(systemName: "doc.on.doc", helpText: "复制") {
             copyClean(snippet.body)
           }
-          Button("编辑") {
+          MainIconButton(systemName: "square.and.pencil", helpText: "编辑") {
             editorTarget = snippet
           }
         } else if let trashItem = selectedTrashItem {
-          Button("恢复") {
+          MainIconButton(systemName: "arrow.uturn.backward", helpText: "恢复") {
             restoreTrashItem(trashItem)
           }
-          Button("立即删除", role: .destructive) {
+          MainIconButton(systemName: "trash", helpText: "立即删除", role: .destructive) {
             permanentlyDeleteTrashItem(trashItem)
           }
         }
