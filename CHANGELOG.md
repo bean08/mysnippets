@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project uses Semantic Versioning for releases.
 
+## [0.0.6] - 2026-04-05
+
+### Added
+- Optional Tab-based line picking for multi-line snippets in the quick insert panel
+
+### Changed
+- Quick insert preview now supports per-line highlighting and Enter inserts the currently selected line when line picking is active
+
 ## [0.0.5] - 2026-03-30
 
 ### Changed

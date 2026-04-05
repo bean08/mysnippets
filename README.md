@@ -86,12 +86,11 @@ Storage schema:
 
 ## Release
 
-- Current version: `0.0.5` (Git release)
-- Recommended Git tag: `v0.0.5`
-- Latest changes in `v0.0.5`:
-  - Replaced several main-window action buttons with icon-first controls
-  - Enlarged action icons for better scanability
-  - Refined the search field to use a taller, more polished native macOS search style
+- Current version: `0.0.6` (Git release)
+- Recommended Git tag: `v0.0.6`
+- Latest changes in `v0.0.6`:
+  - Added optional Tab-based line picking for multi-line snippets in the quick insert panel
+  - Added per-line preview highlighting and Enter now inserts the currently selected line when line picking is active
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
 
 ## License
