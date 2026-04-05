@@ -1130,6 +1130,7 @@ final class UISettings: ObservableObject {
   @AppStorage("storageFilePath") var storageFilePath: String = SnippetStore.defaultStorageFilePath()
   @AppStorage("hotKeyKeyCode") var hotKeyKeyCode: Int = Int(kVK_ANSI_0)
   @AppStorage("hotKeyModifiers") var hotKeyModifiers: Int = Int(optionKey)
+  @AppStorage("quickInsertLinePickingEnabled") var quickInsertLinePickingEnabled: Bool = false
 
   var hotKeyShortcut: HotKeyShortcut {
     get {
@@ -1412,8 +1413,8 @@ final class QuickInsertController {
     }
 
     let view = AnyView(QuickInsertView(
-      onSubmit: { [weak self] snippet in
-        self?.insert(snippet)
+      onSubmit: { [weak self] body in
+        self?.insert(body: body)
       },
       onCancel: { [weak self] in
         self?.hide()
@@ -1554,8 +1555,8 @@ final class QuickInsertController {
   private func updatePanelContentIfNeeded() {
     guard panel != nil, let store, let settings else { return }
     let view = AnyView(QuickInsertView(
-      onSubmit: { [weak self] snippet in
-        self?.insert(snippet)
+      onSubmit: { [weak self] body in
+        self?.insert(body: body)
       },
       onCancel: { [weak self] in
         self?.hide()
@@ -1566,8 +1567,8 @@ final class QuickInsertController {
     host?.rootView = view
   }
 
-  private func insert(_ snippet: Snippet) {
-    let expanded = expandSnippetBody(snippet.body)
+  private func insert(body: String) {
+    let expanded = expandSnippetBody(body)
     hide()
     pasteToPreviousApp(expanded)
   }
@@ -2068,12 +2069,19 @@ struct QuickInsertView: View {
   @EnvironmentObject private var store: SnippetStore
   @EnvironmentObject private var settings: UISettings
 
-  let onSubmit: (Snippet) -> Void
+  let onSubmit: (String) -> Void
   let onCancel: () -> Void
 
   private struct QuickGroup: Hashable {
     let path: [String]
     let name: String
+  }
+
+  private struct LinePickingState: Equatable {
+    let snippetID: String
+    let selectableLineIndices: [Int]
+    let selectableLines: [String]
+    var selectedIndex: Int
   }
 
   private enum QuickItem: Hashable, Identifiable {
@@ -2092,6 +2100,7 @@ struct QuickInsertView: View {
   @State private var selectedItemID: String?
   @State private var currentGroupPath: [String] = []
   @State private var focusSearchField = false
+  @State private var linePickingState: LinePickingState?
 
   var body: some View {
     ZStack {
@@ -2128,9 +2137,19 @@ struct QuickInsertView: View {
     .shadow(color: .black.opacity(0.04), radius: 8, y: 3)
     .onAppear {
       selectedItemID = quickItems.first?.id
+      syncLinePickingState()
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
         focusSearchField = true
       }
+    }
+    .onChange(of: selectedItemID) { _ in
+      syncLinePickingState()
+    }
+    .onChange(of: quickItems.map(\.id)) { _ in
+      syncLinePickingState()
+    }
+    .onChange(of: settings.quickInsertLinePickingEnabled) { _ in
+      syncLinePickingState()
     }
     .onExitCommand {
       handleEscape()
@@ -2174,7 +2193,8 @@ struct QuickInsertView: View {
         onMoveUp: { moveSelection(step: -1) },
         onMoveDown: { moveSelection(step: 1) },
         onSubmit: { handleSubmit() },
-        onEscape: { handleEscape() }
+        onEscape: { handleEscape() },
+        onTab: { handleTab() }
       )
       .frame(height: 34)
 
@@ -2258,16 +2278,35 @@ struct QuickInsertView: View {
               .foregroundStyle(.secondary)
           }
 
-          ScrollView {
-            renderPreviewText(snippet.body)
-              .font(.system(size: settings.fontSize, design: .monospaced))
-              .textSelection(.enabled)
-              .frame(maxWidth: .infinity, alignment: .leading)
-              .fixedSize(horizontal: false, vertical: true)
-              .padding(10)
+          if let linePickingState, linePickingState.snippetID == snippet.id {
+            ScrollViewReader { proxy in
+              ScrollView {
+                quickLinePreview(body: snippet.body, linePickingState: linePickingState)
+                  .frame(maxWidth: .infinity, alignment: .leading)
+                  .fixedSize(horizontal: false, vertical: true)
+                  .padding(10)
+              }
+              .background(panelSectionBackground)
+              .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+              .onAppear {
+                scrollPreview(proxy: proxy, state: linePickingState)
+              }
+              .onChange(of: linePickingState.selectedIndex) { _ in
+                scrollPreview(proxy: proxy, state: linePickingState)
+              }
+            }
+          } else {
+            ScrollView {
+              renderPreviewText(snippet.body)
+                .font(.system(size: settings.fontSize, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(10)
+            }
+            .background(panelSectionBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
           }
-          .background(panelSectionBackground)
-          .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
       } else {
         Text("无可预览内容")
@@ -2433,6 +2472,11 @@ struct QuickInsertView: View {
     return quickItems.first(where: { $0.id == selectedItemID })
   }
 
+  private var selectedSnippet: Snippet? {
+    guard case .snippet(let snippet) = selectedItem else { return nil }
+    return snippet
+  }
+
   private func handleSubmit() {
     guard let id = selectedItemID,
           let selected = quickItems.first(where: { $0.id == id }) else { return }
@@ -2442,11 +2486,16 @@ struct QuickInsertView: View {
       currentGroupPath = group.path
       search = ""
       selectedItemID = nil
+      linePickingState = nil
       DispatchQueue.main.async {
         selectedItemID = quickItems.first?.id
       }
     case .snippet(let snippet):
-      onSubmit(snippet)
+      if let linePickingState, linePickingState.snippetID == snippet.id {
+        onSubmit(linePickingState.selectableLines[linePickingState.selectedIndex])
+      } else {
+        onSubmit(snippet.body)
+      }
     }
   }
 
@@ -2455,6 +2504,7 @@ struct QuickInsertView: View {
       currentGroupPath = Array(currentGroupPath.dropLast())
       search = ""
       selectedItemID = nil
+      linePickingState = nil
       DispatchQueue.main.async {
         selectedItemID = quickItems.first?.id
       }
@@ -2503,6 +2553,82 @@ struct QuickInsertView: View {
     let next = max(0, min(quickItems.count - 1, currentIdx + step))
     selectedItemID = quickItems[next].id
   }
+
+  private func handleTab() -> Bool {
+    guard var linePickingState else { return false }
+    guard linePickingState.selectableLines.count > 1 else { return false }
+    linePickingState.selectedIndex = (linePickingState.selectedIndex + 1) % linePickingState.selectableLines.count
+    self.linePickingState = linePickingState
+    return true
+  }
+
+  private func syncLinePickingState() {
+    guard settings.quickInsertLinePickingEnabled, let snippet = selectedSnippet else {
+      linePickingState = nil
+      return
+    }
+
+    let previewLines = quickInsertPreviewLines(from: snippet.body)
+    let selectableLineIndices = previewLines.enumerated().compactMap { index, line in
+      line.selectableText?.isEmpty == false ? index : nil
+    }
+    let selectableLines = selectableLineIndices.compactMap { previewLines[$0].selectableText }
+    guard selectableLines.count > 1 else {
+      linePickingState = nil
+      return
+    }
+
+    let previousIndex: Int
+    if let linePickingState, linePickingState.snippetID == snippet.id {
+      previousIndex = min(linePickingState.selectedIndex, selectableLines.count - 1)
+    } else {
+      previousIndex = 0
+    }
+
+    linePickingState = LinePickingState(
+      snippetID: snippet.id,
+      selectableLineIndices: selectableLineIndices,
+      selectableLines: selectableLines,
+      selectedIndex: previousIndex
+    )
+  }
+
+  private func isLinePickingActive(for snippet: Snippet) -> Bool {
+    linePickingState?.snippetID == snippet.id
+  }
+
+  @ViewBuilder
+  private func quickLinePreview(body: String, linePickingState: LinePickingState) -> some View {
+    let previewLines = quickInsertPreviewLines(from: body)
+    VStack(alignment: .leading, spacing: 0) {
+      ForEach(Array(previewLines.enumerated()), id: \.element.id) { index, line in
+        let isSelected = linePickingState.selectableLineIndices[linePickingState.selectedIndex] == index
+        renderPreviewLine(line, isSelected: isSelected)
+          .id(line.id)
+      }
+    }
+  }
+
+  private func renderPreviewLine(_ line: QuickInsertPreviewLine, isSelected: Bool) -> some View {
+    HStack(spacing: 0) {
+      quickInsertPreviewText(for: line, selected: isSelected)
+        .font(.system(size: settings.fontSize, design: .monospaced))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .textSelection(.enabled)
+    }
+    .padding(.horizontal, 2)
+    .background(
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .fill(isSelected ? Color.blue.opacity(0.9) : Color.clear)
+    )
+  }
+
+  private func scrollPreview(proxy: ScrollViewProxy, state: LinePickingState) {
+    guard state.selectedIndex < state.selectableLineIndices.count else { return }
+    withAnimation(.easeOut(duration: 0.12)) {
+      proxy.scrollTo(state.selectableLineIndices[state.selectedIndex], anchor: .center)
+    }
+  }
 }
 
 struct QuickSearchField: NSViewRepresentable {
@@ -2513,6 +2639,7 @@ struct QuickSearchField: NSViewRepresentable {
   let onMoveDown: () -> Void
   let onSubmit: () -> Void
   let onEscape: () -> Void
+  let onTab: () -> Bool
 
   func makeCoordinator() -> Coordinator {
     Coordinator(self)
@@ -2571,6 +2698,8 @@ struct QuickSearchField: NSViewRepresentable {
       case #selector(NSResponder.insertNewline(_:)):
         parent.onSubmit()
         return true
+      case #selector(NSResponder.insertTab(_:)):
+        return parent.onTab()
       case #selector(NSResponder.cancelOperation(_:)):
         parent.onEscape()
         return true
@@ -2898,7 +3027,8 @@ struct ContentView: View {
           onMoveUp: { moveSelection(step: -1) },
           onMoveDown: { moveSelection(step: 1) },
           onSubmit: {},
-          onEscape: {}
+          onEscape: {},
+          onTab: { false }
         )
         .frame(height: 34)
         if selectedSidebarSelection == .trash {
@@ -3760,6 +3890,13 @@ struct SettingsView: View {
         .foregroundStyle(.secondary)
 
       VStack(alignment: .leading, spacing: 6) {
+        Toggle("多行 snippet 支持 Tab 逐行选择", isOn: $settings.quickInsertLinePickingEnabled)
+        Text("仅影响悬浮快速插入面板。开启后，选中多行 snippet 时可按 Tab 切换右侧高亮行，回车插入当前行。")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+
+      VStack(alignment: .leading, spacing: 6) {
         Text("存储文件")
         TextField("snippets.json 路径", text: $storagePathDraft)
           .textFieldStyle(.roundedBorder)
@@ -3936,6 +4073,17 @@ struct ExpandedSnippetContent {
   let cursorOffsetFromEnd: Int?
 }
 
+struct QuickInsertPreviewSegment {
+  let text: String
+  let isComment: Bool
+}
+
+struct QuickInsertPreviewLine: Identifiable {
+  let id: Int
+  let segments: [QuickInsertPreviewSegment]
+  let selectableText: String?
+}
+
 func stripComments(_ body: String) -> String {
   body.replacingOccurrences(of: #"\{\{!([\s\S]*?)\}\}"#, with: "", options: .regularExpression)
     .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
@@ -3999,42 +4147,97 @@ func expandSnippetBody(_ body: String, now: Date = Date()) -> ExpandedSnippetCon
   return ExpandedSnippetContent(text: output, cursorOffsetFromEnd: offset)
 }
 
-func renderPreviewText(_ body: String) -> Text {
-  struct Segment {
-    let text: String
-    let isComment: Bool
-  }
-
-  let ns = body as NSString
+func previewSegments(for body: String) -> [QuickInsertPreviewSegment] {
   guard let regex = try? NSRegularExpression(pattern: #"\{\{!([\s\S]*?)\}\}"#) else {
-    return Text(body)
+    return [QuickInsertPreviewSegment(text: body, isComment: false)]
   }
 
-  let matches = regex.matches(in: body, range: NSRange(location: 0, length: ns.length))
-  if matches.isEmpty { return Text(body) }
+  let normalizedBody = body
+    .replacingOccurrences(of: "\r\n", with: "\n")
+    .replacingOccurrences(of: "\r", with: "\n")
+  let normalizedNS = normalizedBody as NSString
+  let matches = regex.matches(in: normalizedBody, range: NSRange(location: 0, length: normalizedNS.length))
+  if matches.isEmpty { return [QuickInsertPreviewSegment(text: normalizedBody, isComment: false)] }
 
-  var segments: [Segment] = []
+  var segments: [QuickInsertPreviewSegment] = []
   var cursor = 0
   for match in matches {
     let full = match.range(at: 0)
     let comment = match.range(at: 1)
     if full.location > cursor {
-      segments.append(Segment(text: ns.substring(with: NSRange(location: cursor, length: full.location - cursor)), isComment: false))
+      segments.append(QuickInsertPreviewSegment(
+        text: normalizedNS.substring(with: NSRange(location: cursor, length: full.location - cursor)),
+        isComment: false
+      ))
     }
     if comment.location != NSNotFound {
-      let note = ns.substring(with: comment).trimmingCharacters(in: .whitespacesAndNewlines)
-      segments.append(Segment(text: "\n[注释] \(note)\n", isComment: true))
+      let note = normalizedNS.substring(with: comment).trimmingCharacters(in: .whitespacesAndNewlines)
+      segments.append(QuickInsertPreviewSegment(text: "\n[注释] \(note)\n", isComment: true))
     }
     cursor = full.location + full.length
   }
-  if cursor < ns.length {
-    segments.append(Segment(text: ns.substring(from: cursor), isComment: false))
+  if cursor < normalizedNS.length {
+    segments.append(QuickInsertPreviewSegment(text: normalizedNS.substring(from: cursor), isComment: false))
   }
+  return segments
+}
 
+func renderPreviewText(_ body: String) -> Text {
+  let segments = previewSegments(for: body)
   return segments.reduce(Text("")) { partial, segment in
     let piece = Text(segment.text).foregroundColor(segment.isComment ? .orange : .primary)
     return partial + piece
   }
+}
+
+func quickInsertPreviewText(for line: QuickInsertPreviewLine, selected: Bool) -> Text {
+  let fallbackColor: Color = selected ? .white : .primary
+  let commentColor: Color = selected ? Color.white.opacity(0.78) : .orange
+  let renderedSegments = line.segments.isEmpty
+    ? [QuickInsertPreviewSegment(text: "", isComment: false)]
+    : line.segments
+
+  return renderedSegments.reduce(Text("")) { partial, segment in
+    let piece = Text(segment.text).foregroundColor(segment.isComment ? commentColor : fallbackColor)
+    return partial + piece
+  }
+}
+
+func quickInsertPreviewLines(from body: String) -> [QuickInsertPreviewLine] {
+  let rawSegments = previewSegments(for: body)
+  var lines: [QuickInsertPreviewLine] = []
+  var currentSegments: [QuickInsertPreviewSegment] = []
+  var lineID = 0
+
+  func flushLine() {
+    let selectableText = currentSegments
+      .filter { !$0.isComment }
+      .map(\.text)
+      .joined()
+    let trimmedSelectable = selectableText.trimmingCharacters(in: .whitespacesAndNewlines)
+    lines.append(QuickInsertPreviewLine(
+      id: lineID,
+      segments: currentSegments,
+      selectableText: trimmedSelectable.isEmpty ? nil : selectableText
+    ))
+    lineID += 1
+    currentSegments = []
+  }
+
+  for segment in rawSegments {
+    let parts = segment.text.components(separatedBy: "\n")
+    for (index, part) in parts.enumerated() {
+      if index > 0 {
+        flushLine()
+      }
+      if !part.isEmpty {
+        currentSegments.append(QuickInsertPreviewSegment(text: part, isComment: segment.isComment))
+      }
+    }
+  }
+
+  flushLine()
+  return lines
 }
 
 func copyClean(_ body: String) {
