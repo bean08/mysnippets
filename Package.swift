@@ -2,16 +2,16 @@
 import PackageDescription
 
 let package = Package(
-  name: "mysnippets",
+  name: "MySnippets",
   platforms: [
     .macOS(.v13)
   ],
   products: [
-    .executable(name: "mysnippets", targets: ["mysnippets"])
+    .executable(name: "MySnippets", targets: ["MySnippets"])
   ],
   targets: [
     .executableTarget(
-      name: "mysnippets",
+      name: "MySnippets",
       path: "Sources/HieraSnipApp"
     )
   ]

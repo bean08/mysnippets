@@ -1,8 +1,8 @@
-# mysnippets
+# MySnippets
 
 [中文文档](README.zh.md) · License: [Apache-2.0](LICENSE)
 
-`mysnippets` is a native macOS snippet manager for fast text insertion with hierarchical organization, dynamic placeholders, and a keyboard-first quick panel.
+`MySnippets` is a native macOS snippet manager for fast text insertion with hierarchical organization, dynamic placeholders, and a keyboard-first quick panel.
 
 ## Features
 
@@ -24,20 +24,20 @@
 ## Development
 
 ```bash
-cd mysnippets
-swift run mysnippets
+cd my-snippets
+swift run MySnippets
 ```
 
 ## Packaging
 
 ```bash
-cd mysnippets
+cd my-snippets
 ./scripts/package-macos.sh
 ```
 
 Outputs:
-- `dist/mysnippets.app`
-- `dist/mysnippets.dmg`
+- `dist/MySnippets.app`
+- `dist/MySnippets.dmg`
 
 The packaging script builds both `arm64` and `x86_64` release binaries and merges them into a universal app bundle.
 
@@ -72,7 +72,7 @@ Summary:
 
 Default storage file:
 
-- `~/Documents/mysnippets/snippets.json`
+- `~/Documents/my-snippets/snippets.json`
 
 The path can be changed in `Settings -> 存储文件`. Enter a full path to `snippets.json`; `~` is supported.
 
@@ -86,11 +86,12 @@ Storage schema:
 
 ## Release
 
-- Current version: `0.0.6` (Git release)
-- Recommended Git tag: `v0.0.6`
-- Latest changes in `v0.0.6`:
-  - Added optional Tab-based line picking for multi-line snippets in the quick insert panel
-  - Added per-line preview highlighting and Enter now inserts the currently selected line when line picking is active
+- Current version: `0.0.7` (Git release)
+- Recommended Git tag: `v0.0.7`
+- Latest changes in `v0.0.7`:
+  - Renamed the app branding from `mysnippets` to `MySnippets`
+  - Renamed the repository and default storage directory to `my-snippets`
+  - Updated the macOS bundle identifier and packaging metadata for the new naming
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
 
 ## License

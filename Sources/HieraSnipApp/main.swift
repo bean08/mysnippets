@@ -88,7 +88,7 @@ final class SnippetStore: ObservableObject {
   static func defaultStorageFilePath() -> String {
     FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent("Documents", isDirectory: true)
-      .appendingPathComponent("mysnippets", isDirectory: true)
+      .appendingPathComponent("my-snippets", isDirectory: true)
       .appendingPathComponent("snippets.json", isDirectory: false)
       .path
   }
@@ -1689,8 +1689,8 @@ final class QuickInsertController {
     alert.informativeText = """
     请前往：
     系统设置 -> 隐私与安全性 -> 辅助功能
-    将 mysnippets 勾选为允许。
-    完成后重启 mysnippets 再试。
+    将 MySnippets 勾选为允许。
+    完成后重启 MySnippets 再试。
     """
     alert.addButton(withTitle: "知道了")
     alert.runModal()
@@ -1706,7 +1706,7 @@ final class QuickInsertController {
     alert.informativeText = """
     请前往：
     系统设置 -> 隐私与安全性 -> 自动化
-    在 mysnippets 下允许控制 System Events。\(detailText)
+    在 MySnippets 下允许控制 System Events。\(detailText)
     """
     alert.addButton(withTitle: "知道了")
     alert.runModal()
@@ -1982,11 +1982,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     if let button = item.button {
       button.image = AppIconFactory.makeStatusBarIcon()
       button.imagePosition = .imageOnly
-      button.toolTip = "mysnippets"
+      button.toolTip = "MySnippets"
     }
 
     let menu = NSMenu()
-    menu.addItem(NSMenuItem(title: "Open mysnippets", action: #selector(openFromStatusItem(_:)), keyEquivalent: ""))
+    menu.addItem(NSMenuItem(title: "Open MySnippets", action: #selector(openFromStatusItem(_:)), keyEquivalent: ""))
     menu.addItem(NSMenuItem(title: "Quick Insert", action: #selector(quickInsertFromStatusItem(_:)), keyEquivalent: ""))
     menu.addItem(.separator())
     menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitFromStatusItem(_:)), keyEquivalent: "q"))
@@ -2017,14 +2017,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 }
 
 @main
-struct mysnippetsApp: App {
+struct MySnippetsApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
   @StateObject private var store = SnippetStore(storageFilePath: SnippetStore.defaultStorageFilePath())
   @StateObject private var settings = UISettings()
   private let initialWindowSize = WindowLayout.defaultMainWindowSize()
 
   var body: some Scene {
-    WindowGroup("mysnippets") {
+    WindowGroup("MySnippets") {
       ContentView()
         .environmentObject(store)
         .environmentObject(settings)

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_NAME="mysnippets"
+APP_NAME="MySnippets"
 VERSION="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
 DIST_DIR="$ROOT_DIR/dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
@@ -17,7 +17,7 @@ X64_BINARY="$ROOT_DIR/.build/x86_64-apple-macosx/release/$APP_NAME"
 DMG_PATH="$DIST_DIR/$APP_NAME.dmg"
 VOL_NAME="$APP_NAME"
 ICON_ICNS="$RESOURCES_DIR/AppIcon.icns"
-ICONSET_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mysnippets.iconset.XXXXXX")/AppIcon.iconset"
+ICONSET_DIR="$(mktemp -d "${TMPDIR:-/tmp}/MySnippets.iconset.XXXXXX")/AppIcon.iconset"
 
 cleanup() {
   rm -rf "${ICONSET_DIR%/AppIcon.iconset}"
@@ -44,13 +44,13 @@ cat > "$INFO_PLIST" <<PLIST
 <plist version="1.0">
 <dict>
   <key>CFBundleDisplayName</key>
-  <string>mysnippets</string>
+  <string>MySnippets</string>
   <key>CFBundleExecutable</key>
-  <string>mysnippets</string>
+  <string>MySnippets</string>
   <key>CFBundleIdentifier</key>
-  <string>com.local.mysnippets</string>
+  <string>com.local.my-snippets</string>
   <key>CFBundleName</key>
-  <string>mysnippets</string>
+  <string>MySnippets</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundlePackageType</key>

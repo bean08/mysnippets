@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project uses Semantic Versioning for releases.
 
+## [0.0.7] - 2026-04-13
+
+### Changed
+- Renamed the app branding from `mysnippets` to `MySnippets`
+- Renamed the repository and local project path to `my-snippets`
+- Changed the default storage path to `~/Documents/my-snippets/snippets.json`
+- Updated the macOS bundle identifier to `com.local.my-snippets`
+- Refreshed packaging metadata and README examples to match the new names
+
 ## [0.0.6] - 2026-04-05
 
 ### Added

@@ -1,8 +1,8 @@
-# mysnippets
+# MySnippets
 
 [English README](README.md) · 许可证：[Apache-2.0](LICENSE)
 
-`mysnippets` 是一个原生 macOS Snippet 管理工具，支持分层组织、动态占位符和键盘优先的快速插入面板。
+`MySnippets` 是一个原生 macOS Snippet 管理工具，支持分层组织、动态占位符和键盘优先的快速插入面板。
 
 ## 功能特性
 
@@ -24,21 +24,21 @@
 ## 开发运行
 
 ```bash
-cd mysnippets
-swift run mysnippets
+cd my-snippets
+swift run MySnippets
 ```
 
 ## 打包
 
 ```bash
-cd mysnippets
+cd my-snippets
 ./scripts/package-macos.sh
 ```
 
 输出文件：
 
-- `dist/mysnippets.app`
-- `dist/mysnippets.dmg`
+- `dist/MySnippets.app`
+- `dist/MySnippets.dmg`
 
 该脚本会分别构建 `arm64` 和 `x86_64` 的 release 二进制，再合并成一个通用应用包。
 
@@ -73,7 +73,7 @@ cd mysnippets
 
 默认存储文件：
 
-- `~/Documents/mysnippets/snippets.json`
+- `~/Documents/my-snippets/snippets.json`
 
 你也可以在 `设置 -> 存储文件` 中改成任意 `snippets.json` 完整路径，支持 `~`。
 
@@ -87,11 +87,12 @@ cd mysnippets
 
 ## 发布
 
-- 当前版本：`0.0.6`
-- 推荐 Git tag：`v0.0.6`
-- `v0.0.6` 最新变更：
-  - 为快速插入面板中的多行 snippet 增加了可选的 Tab 逐行选择能力
-  - 启用逐行选择后，右侧预览支持逐行高亮，回车会插入当前高亮行
+- 当前版本：`0.0.7`
+- 推荐 Git tag：`v0.0.7`
+- `v0.0.7` 最新变更：
+  - 将应用品牌名从 `mysnippets` 统一调整为 `MySnippets`
+  - 将仓库名和默认存储目录统一调整为 `my-snippets`
+  - 更新 macOS bundle identifier 和打包元数据以匹配新的命名
 - 变更记录见：[CHANGELOG.md](CHANGELOG.md)
 
 ## 许可证
